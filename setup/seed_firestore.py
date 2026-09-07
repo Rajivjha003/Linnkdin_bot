@@ -86,9 +86,11 @@ FACTS = {
 }
 
 SEARCH = {
+    # Narrowed to core AI/ML on Rajiv's own triage: he approved four AI-engineering
+    # roles and rejected every Data Engineer / PySpark / web-scraping / backend one.
     "titles": [
-        "AI Engineer", "GenAI Engineer", "Machine Learning Engineer",
-        "Senior Data Scientist", "LLM Engineer",
+        "AI Engineer", "Machine Learning Engineer", "GenAI Engineer",
+        "LLM Engineer", "Applied AI Engineer",
     ],
     "locations": ["Bengaluru, Karnataka, India", "India"],
     "experience_levels": ["mid_senior", "associate"],

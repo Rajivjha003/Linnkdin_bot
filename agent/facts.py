@@ -119,8 +119,10 @@ _PATTERNS: list[tuple[QuestionCategory, re.Pattern[str]]] = [
     (QuestionCategory.NOTICE_PERIOD, re.compile(
         r"\b(notice\s+period|how\s+soon\s+can\s+you\s+(join|start)"
         r"|when\s+can\s+you\s+(join|start)|earliest\s+(start|joining)"
-        r"|date\s+of\s+joining|availability\s+to\s+start"
-        r"|available\s+to\s+start|joining\s+date)\b", re.I)),
+        r"|date\s+of\s+joining|availability\s+to\s+(start|join)"
+        r"|available\s+to\s+(start|join)|joining\s+date"
+        r"|can\s+you\s+join|join\s+immediately|joining\s+time"
+        r"|immediate\s+joiner|serving\s+notice)\b", re.I)),
     (QuestionCategory.YEARS_EXPERIENCE, re.compile(
         r"\bhow\s+many\s+years\b|\byears?\s+of\s+(professional\s+|work\s+|hands[\s-]?on\s+)?"
         r"experience\b|\byears'?\s+experience\b|\byears\b[^?.]{0,25}\bexperience\b", re.I)),
@@ -371,6 +373,31 @@ def resolve(
     if category is QuestionCategory.NOTICE_PERIOD:
         days = facts.notice_period_days
         evidence = f"user_facts.notice_period_days={days}"
+
+        # Asked as a yes/no against a window: "Are you available to join
+        # immediately or within 15 days?" is not asking how long, it is asking
+        # whether you fit. Emitting "15 days" here would match no option at all.
+        boolean_shaped = bool(question.options) and all(
+            o.strip().lower() in ("yes", "no", "select an option")
+            for o in question.options
+        )
+        if boolean_shaped:
+            windows = [int(n) for n in re.findall(r"\b(\d{1,3})\s*(?:days?|day)\b",
+                                                  text, re.I)]
+            months = [int(n) * 30 for n in re.findall(
+                r"\b(\d{1,2})\s*(?:months?|month)\b", text, re.I)]
+            windows += months
+            if windows:
+                fits = days <= max(windows)
+                return answer(
+                    "yes" if fits else "no",
+                    f"{evidence} vs window {max(windows)}d stated in the question",
+                )
+            if re.search(r"\bimmediat\w*", text, re.I):
+                return answer("yes" if facts.immediate_joiner else "no",
+                              f"user_facts.immediate_joiner={facts.immediate_joiner}")
+            return None  # yes/no with no window stated -> cannot judge
+
         if question.kind is AnswerKind.NUMERIC:
             return answer(str(days), evidence)
         alternates = [f"{days} days", str(days)]

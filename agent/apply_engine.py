@@ -508,16 +508,20 @@ class ApplyEngine:
                     _jitter()
                     log.info("selected saved resume %r", filename)
                     return True
-            # A .pdf mentioned anywhere in the dialog means there IS a resume step
-            # and we simply failed to match it -- worth flagging rather than
-            # silently continuing with whatever LinkedIn preselected.
             body = " ".join((self.page.locator("div[role='dialog']").first
                              .inner_text() or "").split()).lower()
+            # Already attached. LinkedIn pre-selects the most recent resume, in
+            # which case there is no radio to click and nothing to do -- the
+            # wanted file simply appears in the dialog text. Treating that as a
+            # failure produced a warning that said the opposite of what happened.
+            if wanted in body:
+                log.info("resume %r already attached by LinkedIn", filename)
+                return True
             if ".pdf" in body:
                 import re as _re
                 offered = _re.findall(r"[\w\-. ]+\.pdf", body)
-                log.warning("resume step present but %r not matched; offered=%s",
-                            filename, sorted(set(offered))[:6])
+                log.warning("resume step present and %r is NOT among the offered "
+                            "files: %s", filename, sorted(set(offered))[:6])
                 return False
             return True  # no resume step on this application
         except Exception as exc:  # noqa: BLE001

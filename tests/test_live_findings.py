@@ -284,3 +284,39 @@ def test_required_salary_blocks_but_stays_actionable():
     assert all(b.category is QuestionCategory.SALARY for b in blocking)
     # And the outcome must be the reviewable one, never FAILED.
     assert result.outcome is ApplyOutcome.ABANDONED_NEEDS_REVIEW
+
+
+# --------------------------------------------------------------------------- #
+# Notice period asked as a yes/no against a stated window.
+#
+# Live: "Are you available to join immediately or within 15 days?" -> [Yes, No].
+# The regex matched "available to start" but not "available to join", and even
+# once classified the resolver emitted "15 days (can join immediately)" -- which
+# fits neither option, because the question asks whether you FIT a window, not
+# how long your notice is.
+# --------------------------------------------------------------------------- #
+_YN = ["Select an option", "Yes", "No"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Are you available to join immediately or within 15 days?", "Yes"),
+    ("Can you join within 30 days?", "Yes"),
+    ("Can you join within 1 month?", "Yes"),             # months -> days
+    ("Are you available to join within 7 days?", "No"),  # 15d notice does NOT fit
+    ("Are you an immediate joiner?", "Yes"),
+])
+def test_notice_period_window_comparison(text, expected):
+    a = resolve(q(text, AnswerKind.SINGLE_SELECT, _YN), FACTS)
+    assert a is not None, text
+    assert a.value == expected, f"{text!r} -> {a.value!r}"
+
+
+def test_notice_window_declines_when_no_window_is_stated():
+    """A bare "are you available to join?" yes/no cannot be judged from facts."""
+    assert resolve(q("Are you available to join?", AnswerKind.SINGLE_SELECT, _YN),
+                   FACTS) is None
+
+
+def test_notice_period_free_text_still_states_the_duration():
+    a = resolve(q("What is your notice period?"), FACTS)
+    assert a is not None and "15" in a.value

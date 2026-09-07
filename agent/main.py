@@ -45,6 +45,26 @@ def cmd_slack(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_heartbeat(args: argparse.Namespace) -> int:
+    from agent import workflows
+
+    print(json.dumps(workflows.run_heartbeat(alarm_only=args.alarm_only),
+                     indent=2, default=str))
+    return 0
+
+
+def cmd_feedback(_: argparse.Namespace) -> int:
+    from agent import feedback
+
+    s = Store()
+    a = feedback.analyse(s)
+    print(json.dumps(a, indent=2, default=str))
+    applied = feedback.apply_auto(s, a)
+    if applied:
+        print("\napplied:", json.dumps(applied, indent=2, default=str))
+    return 0
+
+
 def cmd_status(_: argparse.Namespace) -> int:
     s = Store()
     cfg = s.get_agent_config()
@@ -150,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("digest", help="Workflow C: daily resume gap report").set_defaults(fn=cmd_digest)
     sub.add_parser("slack", help="run the Socket Mode listener").set_defaults(fn=cmd_slack)
+    hb = sub.add_parser("heartbeat", help="post a status line; alarm if gone quiet")
+    hb.add_argument("--alarm-only", action="store_true", dest="alarm_only",
+                    help="only post if the agent has gone silent")
+    hb.set_defaults(fn=cmd_heartbeat)
+    sub.add_parser("feedback", help="what rejections taught, and apply it").set_defaults(fn=cmd_feedback)
     sub.add_parser("status", help="print current state").set_defaults(fn=cmd_status)
     sub.add_parser("probe", help="check every dependency").set_defaults(fn=cmd_probe)
 

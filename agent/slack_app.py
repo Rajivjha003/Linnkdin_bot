@@ -19,7 +19,7 @@ from typing import Any
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from agent import config, slack_notify, workflows
+from agent import config, feedback, slack_notify, workflows
 from agent.answering import learn_from_human, learn_salary_fact
 from agent.models import ApplyOutcome
 from agent.store import Store
@@ -124,6 +124,40 @@ def on_reject(ack, body, client, action):  # noqa: ANN001
         return
     store.set_pending_status(job_id, "rejected", note="rejected in Slack")
     _replace_card(client, body, job_id, "rejected", "will not be applied to")
+
+
+@app.action("reject_reason")
+def on_reject_reason(ack, body, client, action):  # noqa: ANN001
+    """Reject, and record WHY so the filter can tune itself."""
+    ack()
+    raw = (action.get("selected_option") or {}).get("value", "")
+    job_id, _, reason = raw.partition("|")
+    if not job_id:
+        return
+    store = Store()
+    prior = _already_acted(store, job_id)
+    if prior:
+        _replace_card(client, body, job_id, prior,
+                      "already handled — this click was ignored")
+        return
+
+    doc = store.get_pending(job_id) or {}
+    store.set_pending_status(job_id, "rejected", note=f"rejected: {reason}")
+    try:
+        feedback.record_rejection(store, job_id, reason, doc)
+        analysis = feedback.analyse(store)
+        applied = feedback.apply_auto(store, analysis)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("feedback failed for %s: %s", job_id, exc)
+        applied = []
+
+    label = feedback.REASONS.get(reason, reason)
+    detail = f"reason: {label}"
+    if applied:
+        # Say what it learned, so the tuning is never invisible.
+        learned = ", ".join(f"`{p['value']}`" for p in applied)
+        detail += f" · now filtering {learned} from future runs"
+    _replace_card(client, body, job_id, "rejected", detail)
 
 
 @app.action("edit_answers")

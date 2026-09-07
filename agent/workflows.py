@@ -445,3 +445,89 @@ class _WithOverrides:
 
 def _norm(s: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", (s or "").lower()).split())
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeat: prove the agent is alive, and shout if it is not
+# --------------------------------------------------------------------------- #
+#: During these hours a long silence means something is broken, not just quiet.
+ACTIVE_HOURS = (8, 22)
+SILENCE_ALARM_HOURS = 6
+
+
+def run_heartbeat(*, alarm_only: bool = False) -> dict[str, Any]:
+    """Post a one-line status, and alarm if no run has completed recently.
+
+    Without this, a sleeping laptop or a broken scheduled task is indistinguishable
+    from a quiet job market -- and a week could pass before anyone noticed.
+    """
+    import datetime as _dt
+    import zoneinfo
+
+    from agent import feedback
+
+    store = Store()
+    now_ist = _dt.datetime.now(zoneinfo.ZoneInfo(config.TIMEZONE))
+    traces = store.recent_traces(limit=30)
+
+    last = None
+    for t in traces:
+        ts = t.get("created_at")
+        if ts is not None:
+            last = ts if last is None else max(last, ts)
+    hours_since = None
+    if last is not None:
+        hours_since = (dt.datetime.now(dt.timezone.utc) - last).total_seconds() / 3600
+
+    cfg = store.get_agent_config()
+    usage = store.usage_rollup(days=30)
+    submits = store.submits_last_24h()
+    pending = len(store.list_pending())
+    runs_24h = sum(
+        1 for t in traces
+        if t.get("created_at") is not None
+        and (dt.datetime.now(dt.timezone.utc) - t["created_at"]).total_seconds() < 86400
+    )
+
+    in_hours = ACTIVE_HOURS[0] <= now_ist.hour < ACTIVE_HOURS[1]
+    silent = (hours_since is None or hours_since > SILENCE_ALARM_HOURS) and in_hours
+
+    summary = {
+        "runs_24h": runs_24h, "submits_24h": submits, "pending": pending,
+        "hours_since_last_run": round(hours_since, 1) if hours_since else None,
+        "silent": silent, "usd_30d": usage.get("usd", 0.0),
+        "paused": bool(cfg.get("paused")),
+    }
+
+    try:
+        if silent:
+            slack_notify.post([
+                {"type": "header", "text": {"type": "plain_text",
+                                            "text": "⚠️ Agent has gone quiet"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    (f"No run has completed in *"
+                     f"{'ever' if hours_since is None else f'{hours_since:.1f}h'}*, "
+                     f"during working hours.\n\n"
+                     f"Usual causes: the PC was asleep, the `JobAgent-Run` task is "
+                     f"disabled, or LinkedIn logged the session out.\n"
+                     f"Check with `/status`, or run "
+                     f"`Start-ScheduledTask -TaskName JobAgent-Run`.")}},
+            ], "Agent has gone quiet")
+        elif not alarm_only:
+            rej = feedback.analyse(store)
+            line = (f"*{runs_24h}* runs · *{submits}/{cfg['max_submits_24h']}* applied · "
+                    f"*{pending}* waiting on you · bank *{store.bank_size()}* · "
+                    f"${usage.get('usd', 0):.4f} spent (30d)")
+            extra = ""
+            if rej.get("proposals"):
+                extra = ("\n_" + "; ".join(p["why"] for p in rej["proposals"][:2])
+                         + "_")
+            slack_notify.post([
+                {"type": "section", "text": {"type": "mrkdwn",
+                                             "text": "💚 " + line + extra}},
+            ], "agent heartbeat")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("heartbeat post failed: %s", exc)
+
+    log.info("heartbeat: %s", summary)
+    return summary

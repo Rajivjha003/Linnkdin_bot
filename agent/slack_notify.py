@@ -14,6 +14,16 @@ from slack_sdk import WebClient
 from agent import config
 from agent.models import ApplyResult, JobPosting, Provenance
 
+#: Kept here so the card and the handler cannot drift apart.
+_REJECT_REASONS: dict[str, str] = {
+    "wrong_role": "Wrong role / tech stack",
+    "underqualified": "I am underqualified",
+    "overqualified": "I am overqualified",
+    "company": "Company not acceptable",
+    "salary": "Salary too low",
+    "other": "Other",
+}
+
 log = logging.getLogger("agent.slack")
 
 _PROV_ICON = {
@@ -75,8 +85,15 @@ def job_card(job: dict[str, Any], answers: list[dict[str, Any]]) -> list[dict]:
             {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Apply"},
              "style": "primary", "action_id": "approve",
              "value": str(job.get("job_id"))},
-            {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
-             "action_id": "reject", "value": str(job.get("job_id"))},
+            # An overflow menu rather than a plain button: rejecting without a
+            # reason taught the filter nothing, so four Data Engineer roles got
+            # rejected in a row and the next run surfaced three more.
+            {"type": "overflow", "action_id": "reject_reason",
+             "options": [
+                 {"text": {"type": "plain_text", "text": f"❌ {label}"},
+                  "value": f"{job.get('job_id')}|{key}"}
+                 for key, label in _REJECT_REASONS.items()
+             ]},
             {"type": "button", "text": {"type": "plain_text", "text": "✏️ Answer questions"},
              "action_id": "edit_answers", "value": str(job.get("job_id"))},
         ],

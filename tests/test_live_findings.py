@@ -366,3 +366,39 @@ def test_salary_respects_the_unit_the_form_asks_for():
 def test_ambiguous_salary_question_is_declined():
     """"What is your CTC?" names neither current nor expected -- ask a human."""
     assert resolve(q("What is your CTC?"), _CONFIRMED) is None
+
+
+# --------------------------------------------------------------------------- #
+# Whitespace normalisation before matching.
+#
+# "prompt engineering" was reported absent from a resume that lists it, because
+# the PDF wraps the term and extraction yields "prompt\nengineering". This hit
+# EVERY multi-word vocabulary entry -- vector database, computer vision, time
+# series, model registry, google cloud -- against both resumes and job
+# descriptions, so detection depended on where a line happened to break.
+# --------------------------------------------------------------------------- #
+def test_normalise_rejoins_wrapped_multiword_terms():
+    from agent.market import normalise
+
+    assert "prompt engineering" in normalise("...skills: prompt\nengineering · MCP")
+    assert "vector database" in normalise("we use a vector\n  database daily")
+    assert "computer vision" in normalise("Computer\tVision team")
+
+
+def test_normalise_rejoins_hyphens_split_across_lines():
+    from agent.market import normalise
+
+    assert "sentence-transformers" in normalise("FAISS · Sentence-\nTransformers · recall@k")
+    assert "multi-modal" in normalise("a multi-\nmodal RAG chatbot")
+
+
+def test_multiword_skills_detected_despite_line_breaks():
+    """The end-to-end effect: a wrapped skill must still count as present."""
+    from agent.market import SKILL_GROUPS, mentions, normalise
+
+    wrapped = normalise(
+        "Agents LangGraph · custom ReAct loops · prompt\nengineering\n"
+        "RAG FAISS · pgvector · Sentence-\nTransformers · vector\ndatabase"
+    )
+    for skill in ("Prompt engineering", "Embeddings", "Vector databases"):
+        assert mentions(wrapped, SKILL_GROUPS[skill]), skill

@@ -34,3 +34,7 @@ probe_output/
 Thumbs.db
 .idea/
 .vscode/
+
+# ---- node deps for the resume builder (thousands of files, never source) ----
+node_modules/
+Resume/node_modules/

@@ -152,6 +152,22 @@ CATEGORY: dict[str, str] = {k: v[1] for k, v in SKILLS.items()}
 CATEGORY_LABEL = {"ai": "AI / ML", "eng": "Engineering", "infra": "Cloud & data infra"}
 
 
+def normalise(text: str) -> str:
+    """Collapse whitespace and rejoin hyphens split across line breaks.
+
+    Required before ANY matching. A PDF wraps "prompt engineering" as
+    "prompt\nengineering" and "Sentence-Transformers" as "Sentence-\nTransformers",
+    so a literal search for either fails and the skill is reported absent from a
+    document that plainly contains it. Whether a multi-word skill was detected
+    otherwise depends on where a line happens to break.
+    """
+    if not text:
+        return ""
+    # "word-\nnext" -> "word-next"; these are hyphenated terms, not syllable breaks.
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1-\2", text)
+    return " ".join(text.split()).lower()
+
+
 def mentions(haystack: str, forms: list[str]) -> bool:
     """Whole-word match, except forms marked with a trailing '*'.
 
@@ -200,11 +216,11 @@ def analyse(store, jobs: list[dict[str, Any]], resume_text: str,
             *, min_score: int = 40) -> dict[str, Any]:
     """Demand and gaps, computed by string matching. No model involved."""
     kept, dropped = relevant_jobs(store, jobs, min_score=min_score)
-    resume = (resume_text or "").lower()
+    resume = normalise(resume_text)
 
     demand: dict[str, int] = {}
     for j in kept:
-        blob = ((j.get("jd_text") or "") + " " + (j.get("title") or "")).lower()
+        blob = normalise((j.get("jd_text") or "") + " " + (j.get("title") or ""))
         for label, forms in SKILL_GROUPS.items():
             if mentions(blob, forms):
                 demand[label] = demand.get(label, 0) + 1

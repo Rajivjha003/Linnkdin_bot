@@ -24,10 +24,27 @@ RESUME_PDF = ROOT / "Resume" / "Rajiv_Ranjan_Jha_Resume.pdf"
 
 
 def resume_text() -> str:
+    """Extract the resume, repairing words the PDF split across line breaks.
+
+    pypdf returns "Sentence-\nTransformers" for a term that wraps mid-word, and
+    the market analysis then reports Sentence-Transformers as absent from a resume
+    that plainly lists it. The scorer reads this text for every job, so a skill
+    made invisible by a line break costs real match points.
+    """
+    import re
+
     from pypdf import PdfReader
 
     reader = PdfReader(str(RESUME_PDF))
-    return "\n".join((p.extract_text() or "") for p in reader.pages).strip()
+    raw = "\n".join((p.extract_text() or "") for p in reader.pages)
+    # "word-\nnext" -> "word-next": keep the hyphen (these are hyphenated terms
+    # like Sentence-Transformers and multi-modal, not syllable breaks).
+    raw = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1-\2", raw)
+    # Collapse wrapped lines too: "prompt\nengineering" must read as one term.
+    # Paragraph structure is not needed here -- this text is only ever matched
+    # against and fed to the scorer, never displayed.
+    raw = re.sub(r"[ \t]*\n[ \t]*", " ", raw)
+    return " ".join(raw.split()).strip()
 
 
 # Career start Jul 2022 (SK Associates); Alkye from Sep 2024.

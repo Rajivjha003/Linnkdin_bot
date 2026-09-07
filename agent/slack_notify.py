@@ -15,14 +15,20 @@ from agent import config
 from agent.models import ApplyResult, JobPosting, Provenance
 
 #: Kept here so the card and the handler cannot drift apart.
+#:
+#: EXACTLY five. Slack's overflow element rejects a sixth outright with
+#: "no more than 5 items allowed", and because only the individual card fails the
+#: symptom is a digest header with no cards under it. Company and salary are
+#: merged because in practice they are one decision.
 _REJECT_REASONS: dict[str, str] = {
     "wrong_role": "Wrong role / tech stack",
     "underqualified": "I am underqualified",
     "overqualified": "I am overqualified",
-    "company": "Company not acceptable",
-    "salary": "Salary too low",
+    "company": "Company or salary no good",
     "other": "Other",
 }
+#: Slack's documented cap for an overflow element.
+_MAX_OVERFLOW_OPTIONS = 5
 
 log = logging.getLogger("agent.slack")
 
@@ -78,6 +84,12 @@ def job_card(job: dict[str, Any], answers: list[dict[str, Any]]) -> list[dict]:
     if lines:
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": "\n".join(lines)[:2900]}})
+    # Catch a Slack limit breach here, where a test can see it, rather than at
+    # post time where it silently drops one card and keeps the header.
+    assert len(_REJECT_REASONS) <= _MAX_OVERFLOW_OPTIONS, (
+        f"Slack allows at most {_MAX_OVERFLOW_OPTIONS} overflow options, "
+        f"got {len(_REJECT_REASONS)}"
+    )
     blocks.append({
         "type": "actions",
         "block_id": f"job_{job.get('job_id')}",

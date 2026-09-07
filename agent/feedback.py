@@ -38,12 +38,15 @@ C_TUNING = "tuning_log"
 #: How many independent rejections before a keyword is auto-excluded.
 AUTO_EXCLUDE_AFTER = 2
 
+#: Must stay in step with slack_notify._REJECT_REASONS, which is capped at five
+#: by Slack's overflow element. "salary" is retained as an accepted key because
+#: earlier rejections were recorded under it.
 REASONS: dict[str, str] = {
     "wrong_role": "Wrong role / tech stack",
     "underqualified": "I'm underqualified",
     "overqualified": "I'm overqualified",
-    "company": "Company not acceptable",
-    "salary": "Salary too low",
+    "company": "Company or salary no good",
+    "salary": "Company or salary no good",
     "other": "Other",
 }
 

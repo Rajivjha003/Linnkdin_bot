@@ -288,18 +288,53 @@ with st.container(border=True):
 # --------------------------------------------------------------------------- #
 # A curated vocabulary rather than raw n-grams: job descriptions are full of
 # boilerplate, and counting "team" or "stakeholder" tells you nothing actionable.
-SKILL_VOCAB = [
-    "python", "sql", "spark", "pyspark", "scala", "java", "go", "rust",
-    "airflow", "dbt", "kafka", "snowflake", "databricks", "bigquery", "redshift",
-    "aws", "azure", "gcp", "kubernetes", "docker", "terraform",
-    "pytorch", "tensorflow", "scikit-learn", "mlflow", "kubeflow",
-    "llm", "rag", "langchain", "langgraph", "fine-tuning", "prompt engineering",
-    "vector database", "pinecone", "milvus", "faiss", "embeddings",
-    "nlp", "computer vision", "time series", "forecasting", "recommendation",
-    "fastapi", "django", "flask", "react", "node.js", "mongodb", "postgresql",
-    "power bi", "tableau", "looker", "excel", "etl", "data warehouse",
-    "mcp", "agentic", "multi-agent", "guardrails", "evaluation", "observability",
-]
+# Each skill is a GROUP of surface forms. Exact-word matching reported SQL and GCP
+# as missing from a resume that shows "PostgreSQL / AlloyDB", "BigQuery" and
+# "Google Cloud Run" -- which would have meant advising Rajiv to add skills he
+# already demonstrates. Demand counts if ANY form appears in the posting; the
+# resume covers the skill if ANY form appears there.
+SKILL_GROUPS: dict[str, list[str]] = {
+    "python": ["python"],
+    "sql": ["sql", "postgresql", "postgres", "alloydb", "bigquery", "mysql", "t-sql"],
+    "spark / pyspark": ["spark", "pyspark"],
+    "scala": ["scala"],
+    "airflow": ["airflow"],
+    "dbt": ["dbt"],
+    "kafka": ["kafka"],
+    "snowflake": ["snowflake"],
+    "databricks": ["databricks"],
+    "aws": ["aws", "amazon web services", "sagemaker", "redshift"],
+    "azure": ["azure"],
+    "gcp": ["gcp", "google cloud", "cloud run", "vertex ai", "bigquery"],
+    "kubernetes": ["kubernetes", "k8s", "eks", "gke", "aks"],
+    "docker": ["docker", "containeris*", "containeriz*"],
+    "terraform": ["terraform"],
+    "pytorch": ["pytorch", "torch"],
+    "tensorflow": ["tensorflow", "keras"],
+    "scikit-learn": ["scikit-learn", "sklearn"],
+    "mlflow / mlops": ["mlflow", "kubeflow", "mlops", "model registry"],
+    "llm": ["llm", "large language model", "gpt", "gemini", "claude"],
+    "rag": ["rag", "retrieval augmented", "retrieval-augmented"],
+    "langchain / langgraph": ["langchain", "langgraph"],
+    "fine-tuning": ["fine-tuning", "fine tuning", "lora", "qlora", "peft", "sft"],
+    "vector db": ["vector database", "pinecone", "milvus", "faiss", "weaviate",
+                  "chroma", "vector search"],
+    "embeddings": ["embedding*"],
+    "nlp": ["nlp", "natural language processing"],
+    "computer vision": ["computer vision", "yolo", "opencv", "image recognition"],
+    "time series": ["time series", "time-series", "forecasting"],
+    "fastapi": ["fastapi"],
+    "django / flask": ["django", "flask"],
+    "react / node": ["react", "node.js", "nodejs"],
+    "mongodb": ["mongodb", "mongo"],
+    "power bi / tableau": ["power bi", "powerbi", "tableau", "looker"],
+    "etl": ["etl", "elt", "data pipeline", "medallion"],
+    "mcp": ["mcp", "model context protocol"],
+    "agentic": ["agentic", "multi-agent", "multi agent", "ai agent", "adk"],
+    "guardrails / eval": ["guardrail*", "evaluation framework", "groundedness",
+                          "hallucination"],
+    "observability": ["observability", "monitoring", "tracing", "langfuse"],
+}
 
 
 @st.cache_data(ttl="300s")
@@ -309,20 +344,36 @@ def load_market(hours: int = 720) -> dict:
 
     jobs = store().recent_jobs(hours=hours, limit=500)
     resume = (store().get_profile().get("resume_text") or "").lower()
+
+    def mentions(haystack: str, forms: list[str]) -> bool:
+        """Whole-word match, except forms marked with a trailing '*' (prefixes).
+
+        Plain substring matching made "scala" hit "SCALAble" -- which appears in
+        almost every job description and pushed Scala above Python as the
+        most-demanded skill. That was an artefact, not a finding.
+        """
+        for f in forms:
+            if f.endswith("*"):
+                pat = rf"(?<!\w){re.escape(f[:-1])}"
+            else:
+                pat = rf"(?<!\w){re.escape(f)}(?!\w)"
+            if re.search(pat, haystack):
+                return True
+        return False
+
     counts: dict[str, int] = {}
     scored_by_skill: dict[str, list[int]] = {}
     for j in jobs:
         jd = ((j.get("jd_text") or "") + " " + (j.get("title") or "")).lower()
         if not jd.strip():
             continue
-        for sk in SKILL_VOCAB:
-            if re.search(rf"(?<!\w){re.escape(sk)}(?!\w)", jd):
-                counts[sk] = counts.get(sk, 0) + 1
+        for label, forms in SKILL_GROUPS.items():
+            if mentions(jd, forms):
+                counts[label] = counts.get(label, 0) + 1
                 if j.get("match_score") is not None:
-                    scored_by_skill.setdefault(sk, []).append(int(j["match_score"]))
+                    scored_by_skill.setdefault(label, []).append(int(j["match_score"]))
     in_resume = {
-        sk: bool(re.search(rf"(?<!\w){re.escape(sk)}(?!\w)", resume))
-        for sk in counts
+        label: mentions(resume, SKILL_GROUPS[label]) for label in counts
     }
     return {
         "jobs_with_jd": sum(1 for j in jobs if (j.get("jd_text") or "").strip()),

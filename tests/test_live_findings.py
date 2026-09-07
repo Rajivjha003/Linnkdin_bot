@@ -14,7 +14,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agent.facts import FactTable, classify, resolve
-from agent.models import AnswerKind, Provenance, QuestionCategory, ScreeningQuestion
+from agent.models import (AnswerKind, ProposedAnswer, Provenance,
+                          QuestionCategory, ScreeningQuestion)
 
 FACTS = FactTable(
     full_name="Rajiv Ranjan Jha",
@@ -222,3 +223,64 @@ def test_regex_matched_answers_keep_full_trust():
     assert a is not None
     assert a.provenance is Provenance.DETERMINISTIC
     assert a.auto_submittable()
+
+
+# --------------------------------------------------------------------------- #
+# Employers demand CONTRADICTORY formats for the same kind of question:
+#   InfoSpeed  -> "Enter a whole number between 0 and 99"   (4.2 rejected)
+#   Talentgigs -> "Enter a decimal number larger than 0.0"  (4   rejected)
+# No single spelling satisfies both, so the answer carries its alternates and the
+# apply engine re-fills from them when the form complains about the format.
+# --------------------------------------------------------------------------- #
+def test_years_answer_carries_a_decimal_alternate():
+    a = resolve(q("How many years of work experience do you have with Machine Learning?"),
+                FACTS)
+    assert a is not None
+    assert a.value == "4"                      # whole number by default
+    assert any("." in alt for alt in a.value_alternates), a.value_alternates
+
+
+def test_notice_period_carries_a_bare_number_alternate():
+    a = resolve(q("What is your Notice Period?"), FACTS)
+    assert a is not None
+    assert "15" in a.value
+    assert "15" in a.value_alternates or any("15" in x for x in a.value_alternates)
+
+
+@pytest.mark.parametrize("blob,expect_decimal,expect_integer", [
+    ("Enter a decimal number larger than 0.0", True, False),
+    ("Enter a whole number between 0 and 99", False, True),
+    ("This field is required", False, False),
+])
+def test_format_hint_detection(blob, expect_decimal, expect_integer):
+    from agent.apply_engine import _WANTS_DECIMAL, _WANTS_INTEGER
+
+    assert bool(_WANTS_DECIMAL.search(blob)) is expect_decimal
+    assert bool(_WANTS_INTEGER.search(blob)) is expect_integer
+
+
+# --------------------------------------------------------------------------- #
+# Salary is required by some forms and never auto-answered by policy, so the
+# application legitimately cannot proceed. That is "needs a human", NOT "failed":
+# recording it as failed dropped the job out of list_pending() and hid the very
+# question the user had to answer.
+# --------------------------------------------------------------------------- #
+def test_required_salary_blocks_but_stays_actionable():
+    from agent.models import ApplyOutcome, ApplyResult, Provenance as P
+
+    result = ApplyResult(job_id="1", outcome=ApplyOutcome.ABANDONED_NEEDS_REVIEW, answers=[
+        ProposedAnswer(question_text="What is your total years of experience?",
+                       category=QuestionCategory.YEARS_EXPERIENCE, value="4",
+                       provenance=P.DETERMINISTIC, evidence="user_facts"),
+        ProposedAnswer(question_text="What is your Current CTC?",
+                       category=QuestionCategory.SALARY, value="",
+                       provenance=P.LLM, evidence="", reason="policy"),
+        ProposedAnswer(question_text="What is your Expected CTC?",
+                       category=QuestionCategory.SALARY, value="",
+                       provenance=P.LLM, evidence="", reason="policy"),
+    ])
+    blocking = result.blocking_answers()
+    assert len(blocking) == 2
+    assert all(b.category is QuestionCategory.SALARY for b in blocking)
+    # And the outcome must be the reviewable one, never FAILED.
+    assert result.outcome is ApplyOutcome.ABANDONED_NEEDS_REVIEW

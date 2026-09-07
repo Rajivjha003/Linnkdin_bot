@@ -341,6 +341,8 @@ def resolve(
             value=value,
             provenance=Provenance.DETERMINISTIC,
             evidence=evidence,
+            # Kept for the form-format retry, not just for option matching.
+            value_alternates=[a for a in alternates if a and a != value],
         )
 
     # -- EEO: always decline. Legal everywhere, and never a disadvantage.

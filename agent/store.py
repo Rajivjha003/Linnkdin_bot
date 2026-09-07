@@ -241,8 +241,12 @@ class Store:
         return [d.to_dict() | {"_id": d.id} for d in q.stream()]
 
     def set_pending_status(self, job_id: str, status: str, **extra: Any) -> None:
+        # Drop None values: callers pass `answers=None` to mean "leave the existing
+        # answers alone", and writing None would erase the blocking questions the
+        # Slack card needs.
+        fields = {k: v for k, v in extra.items() if v is not None}
         self.db.collection(C_PENDING).document(str(job_id)).set(
-            {"status": status, "updated_at": _now(), **extra}, merge=True
+            {"status": status, "updated_at": _now(), **fields}, merge=True
         )
 
     def recent_jobs(self, hours: int = 24, limit: int = 200) -> list[dict[str, Any]]:

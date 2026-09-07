@@ -47,6 +47,18 @@ EMBED_DIM = 1536
 # in a purpose-made directory with a protected DACL. See setup/harden_browser_dir.ps1
 BROWSERS_PATH = os.getenv("PLAYWRIGHT_BROWSERS_PATH", r"C:\pw-browsers")
 BROWSER_TMP = str(pathlib.Path(BROWSERS_PATH) / "_tmp")
+
+# EXPORT these, do not merely read them. Patchright reads PLAYWRIGHT_BROWSERS_PATH
+# from the environment when it launches, and under Task Scheduler nothing sets it --
+# so it would fall back to %LOCALAPPDATA%\ms-playwright and fail its ACL check,
+# meaning every scheduled run silently never got a browser. Setting it here makes
+# the agent behave identically however it is started.
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS_PATH
+pathlib.Path(BROWSER_TMP).mkdir(parents=True, exist_ok=True)
+os.environ["TEMP"] = BROWSER_TMP
+os.environ["TMP"] = BROWSER_TMP
+os.environ.setdefault("LINKEDIN_MCP_CONTAINER", "false")
+os.environ.setdefault("AUTO_IMPORT_FROM_BROWSER", "false")
 LINKEDIN_STATE_DIR = ROOT / ".linkedin-mcp"
 MCP_SERVER_EXE = str(ROOT / ".venv" / "Scripts" / "mcp-server-linkedin.exe")
 

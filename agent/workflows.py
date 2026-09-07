@@ -377,9 +377,22 @@ def apply_approved(job_id: str, *, headless: bool = True) -> ApplyResult:
         store.set_paused(True, reason="auth failure during approved apply")
         slack_notify.send_auth_failure(result.error)
     store.record_attempt(job, result)
+    # "Needs a human" must stay actionable. ABANDONED_NEEDS_REVIEW means the form
+    # is blocked on an answer only the user can give -- salary, most often -- so it
+    # goes back to `pending` rather than `failed`. Marking it failed would drop it
+    # out of list_pending() and hide the very question that needs answering.
+    if result.outcome is ApplyOutcome.SUBMITTED:
+        new_status = "applied"
+    elif result.outcome is ApplyOutcome.ABANDONED_NEEDS_REVIEW:
+        new_status = "pending"
+    elif result.outcome is ApplyOutcome.SKIPPED_CAP:
+        new_status = "pending"
+    else:
+        new_status = "failed"
     store.set_pending_status(
-        job_id, "applied" if result.outcome is ApplyOutcome.SUBMITTED else "failed",
+        job_id, new_status,
         note=result.error[:300],
+        answers=[a.model_dump(mode="json") for a in result.answers] or None,
     )
     return result
 

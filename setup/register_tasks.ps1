@@ -26,11 +26,11 @@ function Register-AgentTask {
     param(
         [string]$Name,
         [string]$Exe,
-        [string]$Args,
+        [string]$Arguments,   # NOT $Args: that is a PowerShell automatic variable
         [Microsoft.Management.Infrastructure.CimInstance[]]$Triggers,
         [string]$Description
     )
-    $action = New-ScheduledTaskAction -Execute $Exe -Argument $Args -WorkingDirectory $Root
+    $action = New-ScheduledTaskAction -Execute $Exe -Argument $Arguments -WorkingDirectory $Root
     # Run only on AC power? No -- a laptop on battery should still work. But do not
     # wake the machine: a run that never happens is strictly safer than a burst.
     $settings = New-ScheduledTaskSettingsSet `
@@ -55,20 +55,20 @@ function Register-AgentTask {
 # 20-application cap comfortably while looking far less mechanical.
 $runTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddHours(8) `
     -RepetitionInterval (New-TimeSpan -Hours 2) -RepetitionDuration (New-TimeSpan -Hours 14)
-Register-AgentTask -Name "JobAgent-Run" -Exe $Python -Args "-m agent.main run" `
+Register-AgentTask -Name "JobAgent-Run" -Exe $Python -Arguments "-m agent.main run" `
     -Triggers @($runTrigger) `
     -Description "LinkedIn Easy Apply pass. Respects agent_config.dry_run and the rolling 24h cap."
 
 # --- Workflow C: 21:00 IST daily --------------------------------------------
 $digestTrigger = New-ScheduledTaskTrigger -Daily -At "21:00"
-Register-AgentTask -Name "JobAgent-Digest" -Exe $Python -Args "-m agent.main digest" `
+Register-AgentTask -Name "JobAgent-Digest" -Exe $Python -Arguments "-m agent.main digest" `
     -Triggers @($digestTrigger) `
     -Description "Daily resume gap report + XLSX export to GCS."
 
 # --- Slack listener: at logon, windowless -----------------------------------
 # pythonw avoids a permanent console window. Socket Mode reconnects on its own.
 $slackTrigger = New-ScheduledTaskTrigger -AtLogOn
-Register-AgentTask -Name "JobAgent-Slack" -Exe $PyW -Args "-m agent.main slack" `
+Register-AgentTask -Name "JobAgent-Slack" -Exe $PyW -Arguments "-m agent.main slack" `
     -Triggers @($slackTrigger) `
     -Description "Slack Socket Mode listener: Approve/Reject buttons and slash commands."
 

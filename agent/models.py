@@ -139,6 +139,11 @@ class ProposedAnswer(BaseModel):
     #: Why a human is needed, when one is. Shown on the Slack card. Purely
     #: explanatory -- it never affects the gate.
     reason: str = ""
+    #: Equivalent spellings of the same value, most-preferred first. Used when a
+    #: form rejects the primary form: live employers demand contradictory formats
+    #: for years of experience ("whole number" vs "decimal number"), so the engine
+    #: re-fills from here rather than guessing one and losing the application.
+    value_alternates: list[str] = Field(default_factory=list)
 
     def auto_submittable(self) -> bool:
         if self.category in HUMAN_ONLY and self.provenance is not Provenance.HUMAN:

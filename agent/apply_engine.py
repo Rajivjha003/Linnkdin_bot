@@ -107,6 +107,11 @@ SEL_CONTROLS = (
 )
 AUTH_MARKERS = ("/login", "/checkpoint", "/authwall", "/uas/login")
 
+#: Validation messages that mean "right answer, wrong spelling". Live employers
+#: contradict each other on years fields, so the format has to be adaptive.
+_WANTS_DECIMAL = re.compile(r"decimal number|decimal value", re.I)
+_WANTS_INTEGER = re.compile(r"whole number|integer", re.I)
+
 
 class AuthFailure(RuntimeError):
     """Session dead. The caller must halt everything, not retry."""
@@ -430,6 +435,51 @@ class ApplyEngine:
             log.warning("could not fill %r: %s", question.text[:60], exc)
             return False
 
+
+    def _reformat_and_refill(self, modal, questions, answers, errors: list[str]) -> bool:
+        """Re-fill answers using an alternate spelling the form will accept.
+
+        Returns True if anything was rewritten. Driven by the page's own validation
+        text, so it only acts when the form has actually said what it wants.
+        """
+        blob = " ".join(errors)
+        wants_decimal = bool(_WANTS_DECIMAL.search(blob))
+        wants_integer = bool(_WANTS_INTEGER.search(blob))
+        if not (wants_decimal or wants_integer):
+            return False
+
+        by_text = {a.question_text: a for a in answers}
+        changed = False
+        for q in questions:
+            ans = by_text.get(q.text)
+            if ans is None or not ans.value:
+                continue
+            candidates = [ans.value, *ans.value_alternates]
+            pick = None
+            for cand in candidates:
+                looks_decimal = "." in cand
+                if wants_decimal and looks_decimal:
+                    pick = cand
+                    break
+                if wants_integer and not looks_decimal and cand.isdigit():
+                    pick = cand
+                    break
+            # Nothing suitable on hand: derive it from the value we do have.
+            if pick is None:
+                head = ans.value.split()[0] if ans.value else ""
+                try:
+                    num = float(head)
+                except ValueError:
+                    continue
+                pick = f"{num:.1f}" if wants_decimal else str(int(num))
+            if pick == ans.value:
+                continue
+            ans.value = pick
+            if self.fill_answer(modal, q, ans):
+                changed = True
+                log.info("  refilled %r as %r", q.text[:50], pick)
+        return changed
+
     # ------------------------------------------------------------------ #
     def select_saved_resume(self, modal, filename: str) -> bool:
         """Choose an already-uploaded resume by its visible filename.
@@ -552,6 +602,7 @@ class ApplyEngine:
             result.modal_opened = True
 
             seen_signatures: list[str] = []
+            reformatted = False
             for step in range(1, MAX_STEPS + 1):
                 self._check_auth()
                 questions = self.read_questions(modal)
@@ -564,6 +615,28 @@ class ApplyEngine:
                 # is both useless and a lot of pointless activity on the account.
                 signature = "|".join(sorted(q.text[:60] for q in questions))
                 if signature and seen_signatures[-1:] == [signature]:
+                    # Before giving up: the page may be rejecting the FORMAT of an
+                    # otherwise-correct answer. One live employer demands a whole
+                    # number where another demands a decimal, so re-spell and retry
+                    # once rather than lose the application.
+                    errors = self._validation_errors()
+                    if not reformatted and self._reformat_and_refill(
+                        modal, questions, result.answers, errors
+                    ):
+                        reformatted = True
+                        st.kind = "reformat"
+                        st.action = "refilled"
+                        st.note = f"format rejected ({errors}); retried with alternate"
+                        traces.append(st)
+                        log.info("job %s: %s -> refilled with alternate spelling",
+                                 job.job_id, errors)
+                        seen_signatures.append(signature)
+                        nxt = _first(self.page, SEL_REVIEW, timeout=1200) or \
+                              _first(self.page, SEL_NEXT, timeout=1200)
+                        if nxt is not None:
+                            nxt.click()
+                            _jitter(1.0, 2.0)
+                        continue
                     st.kind = "stalled"
                     st.action = "discarded"
                     errors = self._validation_errors()

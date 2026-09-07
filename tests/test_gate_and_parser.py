@@ -54,11 +54,27 @@ def test_missing_evidence_blocks_even_a_safe_provenance():
     assert not ans(Provenance.BANK_MATCH, evidence="   ").auto_submittable()
 
 
-def test_salary_requires_a_human_even_if_deterministic():
-    a = ans(Provenance.DETERMINISTIC, category=QuestionCategory.SALARY, value="20")
-    assert not a.auto_submittable()
-    human = ans(Provenance.HUMAN, category=QuestionCategory.SALARY, value="20")
-    assert human.auto_submittable()
+def test_salary_is_submittable_only_from_a_confirmed_fact():
+    """Policy change, deliberate.
+
+    Salary was once human-ONLY on the grounds that a wrong number is
+    unrecoverable. That is true of INFERRING a salary and false of using one the
+    user explicitly typed -- and re-asking it on every application was the single
+    most repetitive interruption in the system.
+
+    A DETERMINISTIC salary answer is now submittable, but `facts.resolve` only
+    produces one when `user_facts.salary_confirmed` is True, which happens solely
+    because the user typed the number in Slack. Retrieval and the model stay
+    forbidden: "current CTC" and "expected CTC" are near-identical strings with
+    different correct answers.
+    """
+    assert ans(Provenance.DETERMINISTIC,
+               category=QuestionCategory.SALARY, value="20").auto_submittable()
+    assert ans(Provenance.HUMAN,
+               category=QuestionCategory.SALARY, value="20").auto_submittable()
+    assert QuestionCategory.SALARY in BANK_AND_LLM_FORBIDDEN
+    assert not ans(Provenance.LLM,
+                   category=QuestionCategory.SALARY, value="20").auto_submittable()
 
 
 def test_one_bad_answer_blocks_the_whole_application():

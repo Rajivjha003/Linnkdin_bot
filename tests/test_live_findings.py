@@ -320,3 +320,49 @@ def test_notice_window_declines_when_no_window_is_stated():
 def test_notice_period_free_text_still_states_the_duration():
     a = resolve(q("What is your notice period?"), FACTS)
     assert a is not None and "15" in a.value
+
+
+# --------------------------------------------------------------------------- #
+# Salary: learned once from you, then answered deterministically.
+#
+# Re-asking CTC on every application was the most repetitive interruption in the
+# system. A salary you have typed is a fact; a salary inferred is not. So it is
+# answered only when `salary_confirmed` is True, and "current" vs "expected" is
+# decided by keyword rather than similarity -- the two strings are near-identical
+# to an embedding but have different correct answers.
+# --------------------------------------------------------------------------- #
+_UNCONFIRMED = FactTable(current_ctc_lpa=9.6, expected_ctc_lpa=20.0,
+                         salary_confirmed=False)
+_CONFIRMED = FactTable(current_ctc_lpa=9.6, expected_ctc_lpa=20.0,
+                       salary_confirmed=True)
+
+
+@pytest.mark.parametrize("text", [
+    "What is your Current CTC?",
+    "What is your Expected CTC?",
+    "What is your current CTC in Lacs per annum? *",
+])
+def test_salary_declined_until_you_confirm_it(text):
+    assert resolve(q(text), _UNCONFIRMED) is None
+
+
+def test_salary_distinguishes_current_from_expected():
+    cur = resolve(q("What is your Current CTC?"), _CONFIRMED)
+    exp = resolve(q("What is your Expected CTC?"), _CONFIRMED)
+    assert cur is not None and exp is not None
+    assert cur.value == "9.6"
+    assert exp.value == "20"
+    assert cur.value != exp.value          # the whole point
+    assert "confirmed by you" in exp.evidence
+
+
+def test_salary_respects_the_unit_the_form_asks_for():
+    lacs = resolve(q("What is your current CTC in Lacs per annum? *"), _CONFIRMED)
+    rupees = resolve(q("Expected annual CTC in rupees"), _CONFIRMED)
+    assert lacs.value == "9.6"
+    assert rupees.value == "2000000"
+
+
+def test_ambiguous_salary_question_is_declined():
+    """"What is your CTC?" names neither current nor expected -- ask a human."""
+    assert resolve(q("What is your CTC?"), _CONFIRMED) is None

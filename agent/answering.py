@@ -158,6 +158,44 @@ class AnswerEngine:
         )
 
 
+def learn_salary_fact(store: Store, question_text: str, answer_text: str) -> str | None:
+    """Store a salary the user typed as a FACT, so it is never asked again.
+
+    Salary cannot go in the vector bank -- "current CTC" and "expected CTC" are
+    near-identical strings with different correct answers, exactly the failure mode
+    that keeps retrieval out of this category. But it is a perfectly good
+    deterministic fact once stated, so it goes to `user_facts` instead.
+
+    Returns the field written, or None.
+    """
+    import re as _re
+
+    low = question_text.lower()
+    wants_expected = bool(_re.search(
+        r"\b(expect|desired|asking|require|looking\s+for|preferred)\w*", low))
+    wants_current = bool(_re.search(
+        r"\b(current|present|existing|drawing|latest)\w*", low))
+    if wants_expected == wants_current:
+        return None
+
+    nums = _re.findall(r"\d+(?:\.\d+)?", answer_text.replace(",", ""))
+    if not nums:
+        return None
+    val = float(nums[0])
+    # Accept either "20" (LPA) or "2000000" (absolute rupees).
+    if val > 1000:
+        val = round(val / 100000, 2)
+    if not (0.5 <= val <= 200):
+        log.warning("salary %r out of plausible range; not stored", answer_text[:40])
+        return None
+
+    field = "expected_ctc_lpa" if wants_expected else "current_ctc_lpa"
+    store.db.collection("user_facts").document("me").set(
+        {field: val, "salary_confirmed": True}, merge=True)
+    log.info("learned %s = %s LPA from your Slack answer", field, val)
+    return field
+
+
 def learn_from_human(
     store: Store, question_text: str, answer_text: str
 ) -> str | None:

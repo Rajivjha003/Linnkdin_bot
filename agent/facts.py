@@ -200,6 +200,9 @@ class FactTable:
     immediate_joiner: bool = True
     current_ctc_lpa: float = 0.0
     expected_ctc_lpa: float = 0.0
+    #: True only once the user has typed their CTC in Slack. Until then every
+    #: salary question is routed to them.
+    salary_confirmed: bool = False
     willing_to_relocate: bool = True
     relocate_scope: str = "anywhere_in_india"
     highest_degree: str = "Bachelor's Degree"
@@ -310,11 +313,6 @@ def resolve(
     if category in (QuestionCategory.UNKNOWN, QuestionCategory.FREE_TEXT):
         return None
 
-    # Salary is never answered without a human, by policy: a wrong number cannot be
-    # corrected once the application is submitted.
-    if category is QuestionCategory.SALARY:
-        return None
-
     def answer(value: str, evidence: str, *alternates: str) -> ProposedAnswer | None:
         """Build the answer, trying `alternates` when a choice list is offered.
 
@@ -346,6 +344,37 @@ def resolve(
             # Kept for the form-format retry, not just for option matching.
             value_alternates=[a for a in alternates if a and a != value],
         )
+
+    if category is QuestionCategory.SALARY:
+        # Only answerable from numbers the user has explicitly confirmed. Until
+        # then, decline -- guessing a salary is unrecoverable.
+        if not facts.salary_confirmed:
+            return None
+        low = text.lower()
+        # "current" vs "expected" is decided by keyword, never by similarity: the
+        # two questions are near-identical strings with different right answers.
+        wants_expected = bool(re.search(
+            r"\b(expect|desired|asking|require|looking\s+for|preferred)\w*", low))
+        wants_current = bool(re.search(
+            r"\b(current|present|existing|drawing|latest)\w*", low))
+        if wants_expected == wants_current:
+            return None  # ambiguous or both -> ask a human
+        if wants_expected:
+            val, key = facts.expected_ctc_lpa, "expected_ctc_lpa"
+        else:
+            val, key = facts.current_ctc_lpa, "current_ctc_lpa"
+        if not val:
+            return None
+        # Units: forms ask in LPA, in lakhs, or in absolute rupees.
+        lpa = f"{val:g}"
+        absolute = f"{int(val * 100000)}"
+        if re.search(r"\b(in\s+lacs|in\s+lakhs|lpa|per\s+annum\s+in\s+la)", low):
+            primary, alts = lpa, [absolute, f"{lpa} LPA"]
+        elif re.search(r"\b(in\s+rupees|in\s+inr|absolute|annual\s+ctc\s+in\s+n)", low):
+            primary, alts = absolute, [lpa, f"{lpa} LPA"]
+        else:
+            primary, alts = lpa, [f"{lpa} LPA", absolute]
+        return answer(primary, f"user_facts.{key}={val} (confirmed by you)", *alts)
 
     # -- EEO: always decline. Legal everywhere, and never a disadvantage.
     if category is QuestionCategory.EEO:

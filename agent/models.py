@@ -77,9 +77,15 @@ BANK_AND_LLM_FORBIDDEN: frozenset[QuestionCategory] = frozenset(
 )
 
 #: Categories that must always reach a human, even deterministically.
-#: Salary is here because a wrong number is unrecoverable and cannot be corrected
-#: after submission.
-HUMAN_ONLY: frozenset[QuestionCategory] = frozenset({QuestionCategory.SALARY})
+#:
+#: Salary used to be here. It no longer is: a salary you have explicitly stated is
+#: a fact like any other, and re-asking it on every application was the single
+#: most repetitive interruption in the system. It remains in
+#: BANK_AND_LLM_FORBIDDEN -- retrieval must never supply it, because "current CTC"
+#: and "expected CTC" are near-identical strings with different correct answers --
+#: and `facts.resolve` answers it only when `user_facts.salary_confirmed` is True,
+#: which happens solely because the user typed the numbers in Slack.
+HUMAN_ONLY: frozenset[QuestionCategory] = frozenset()
 
 
 class AnswerKind(str, Enum):

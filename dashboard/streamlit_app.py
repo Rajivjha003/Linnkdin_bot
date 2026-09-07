@@ -282,4 +282,140 @@ with st.container(border=True):
             load_state.clear()
             st.rerun()
 
+
+# --------------------------------------------------------------------------- #
+# Job market: what employers are asking for, and what the resume lacks
+# --------------------------------------------------------------------------- #
+# A curated vocabulary rather than raw n-grams: job descriptions are full of
+# boilerplate, and counting "team" or "stakeholder" tells you nothing actionable.
+SKILL_VOCAB = [
+    "python", "sql", "spark", "pyspark", "scala", "java", "go", "rust",
+    "airflow", "dbt", "kafka", "snowflake", "databricks", "bigquery", "redshift",
+    "aws", "azure", "gcp", "kubernetes", "docker", "terraform",
+    "pytorch", "tensorflow", "scikit-learn", "mlflow", "kubeflow",
+    "llm", "rag", "langchain", "langgraph", "fine-tuning", "prompt engineering",
+    "vector database", "pinecone", "milvus", "faiss", "embeddings",
+    "nlp", "computer vision", "time series", "forecasting", "recommendation",
+    "fastapi", "django", "flask", "react", "node.js", "mongodb", "postgresql",
+    "power bi", "tableau", "looker", "excel", "etl", "data warehouse",
+    "mcp", "agentic", "multi-agent", "guardrails", "evaluation", "observability",
+]
+
+
+@st.cache_data(ttl="300s")
+def load_market(hours: int = 720) -> dict:
+    """Count vocabulary hits across stored job descriptions."""
+    import re
+
+    jobs = store().recent_jobs(hours=hours, limit=500)
+    resume = (store().get_profile().get("resume_text") or "").lower()
+    counts: dict[str, int] = {}
+    scored_by_skill: dict[str, list[int]] = {}
+    for j in jobs:
+        jd = ((j.get("jd_text") or "") + " " + (j.get("title") or "")).lower()
+        if not jd.strip():
+            continue
+        for sk in SKILL_VOCAB:
+            if re.search(rf"(?<!\w){re.escape(sk)}(?!\w)", jd):
+                counts[sk] = counts.get(sk, 0) + 1
+                if j.get("match_score") is not None:
+                    scored_by_skill.setdefault(sk, []).append(int(j["match_score"]))
+    in_resume = {
+        sk: bool(re.search(rf"(?<!\w){re.escape(sk)}(?!\w)", resume))
+        for sk in counts
+    }
+    return {
+        "jobs_with_jd": sum(1 for j in jobs if (j.get("jd_text") or "").strip()),
+        "total_jobs": len(jobs),
+        "counts": counts,
+        "in_resume": in_resume,
+        "avg_score": {k: sum(v) / len(v) for k, v in scored_by_skill.items() if v},
+    }
+
+
+st.divider()
+mk = load_market()
+
+with st.container(border=True):
+    st.subheader("Job market")
+    st.caption(
+        f"From the full text of {mk['jobs_with_jd']} job descriptions the agent has "
+        f"stored (of {mk['total_jobs']} jobs seen). Every JD is kept, so this gets "
+        f"sharper the longer the agent runs."
+    )
+    if not mk["counts"]:
+        st.info("No job descriptions stored yet. Run the agent to build this up.")
+    else:
+        ranked = sorted(mk["counts"].items(), key=lambda kv: -kv[1])
+        gap = [(k, v) for k, v in ranked if not mk["in_resume"].get(k)]
+
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            st.markdown("**Most requested, and whether your resume shows it**")
+            top = ranked[:18]
+            df = pd.DataFrame({
+                "skill": [k for k, _ in top],
+                "postings": [v for _, v in top],
+            }).set_index("skill")
+            # One series of magnitudes -> single sequential hue, no legend needed.
+            st.bar_chart(df, horizontal=True, color=SEQ_BLUE, height=430)
+        with c2:
+            st.markdown("**Missing from your resume**")
+            if not gap:
+                st.success("Nothing in the top vocabulary is absent.", icon="✅")
+            else:
+                st.dataframe(
+                    pd.DataFrame({
+                        "skill": [k for k, _ in gap[:14]],
+                        "postings": [v for _, v in gap[:14]],
+                        "avg match": [
+                            f"{mk['avg_score'].get(k, float('nan')):.0f}"
+                            if k in mk["avg_score"] else "-"
+                            for k, _ in gap[:14]
+                        ],
+                    }),
+                    hide_index=True, width="stretch", height=430,
+                )
+            st.caption(
+                "Ranked by how many postings ask for it. The 21:00 Slack digest "
+                "adds an LLM reading of the same data."
+            )
+
+        with st.expander("Full table — every skill, demand, and whether you have it"):
+            st.dataframe(
+                pd.DataFrame({
+                    "skill": [k for k, _ in ranked],
+                    "postings": [v for _, v in ranked],
+                    "on your resume": ["yes" if mk["in_resume"].get(k) else "NO"
+                                       for k, _ in ranked],
+                }),
+                hide_index=True, width="stretch",
+            )
+
+with st.container(border=True):
+    st.subheader("What happened to every job seen")
+    st.caption("The funnel. Most jobs are filtered before any browser opens.")
+    allj = store().recent_jobs(hours=720, limit=500)
+    if not allj:
+        st.info("Nothing recorded yet.")
+    else:
+        counts = pd.Series([j.get("status") or "queued" for j in allj]).value_counts()
+        labels = {
+            "submitted": "applied",
+            "skipped_low_score": "scored too low",
+            "abandoned_needs_review": "needs your answer",
+            "failed": "failed",
+            "pending": "awaiting review",
+            "skipped_duplicate": "duplicate",
+            "skipped_cap": "hit the cap",
+        }
+        st.dataframe(
+            pd.DataFrame({
+                "outcome": [labels.get(k, k) for k in counts.index],
+                "jobs": counts.values,
+                "share": [f"{v / counts.sum():.0%}" for v in counts.values],
+            }),
+            hide_index=True, width="stretch",
+        )
+
 st.caption("Reads Firestore directly · caches for 60s · $0 to run")

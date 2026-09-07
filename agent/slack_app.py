@@ -20,7 +20,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from agent import config, slack_notify, workflows
-from agent.answering import learn_from_human
+from agent.answering import learn_from_human, learn_salary_fact
 from agent.models import ApplyOutcome
 from agent.store import Store
 
@@ -46,36 +46,68 @@ def _guard(fn):
 # --------------------------------------------------------------------------- #
 # Buttons
 # --------------------------------------------------------------------------- #
+def _already_acted(store, job_id: str) -> str | None:
+    """Return the existing verdict if this job has already been dealt with."""
+    doc = store.get_pending(job_id) or {}
+    status = doc.get("status")
+    if status in ("applied", "rejected", "in_progress"):
+        return status
+    return None
+
+
+def _replace_card(client, body, job_id: str, verdict: str, detail: str = "") -> None:
+    """Swap the clicked card for a resolved one, so the buttons disappear."""
+    try:
+        channel = body["channel"]["id"]
+        ts = body["message"]["ts"]
+        doc = Store().get_pending(job_id) or {"job_id": job_id}
+        blocks = slack_notify.resolved_card(doc, verdict, detail)
+        client.chat_update(channel=channel, ts=ts, blocks=blocks,
+                           text=f"{verdict}: {doc.get('title', job_id)}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not replace card for %s: %s", job_id, exc)
+
+
 @app.action("approve")
 def on_approve(ack, body, client, action):  # noqa: ANN001
     ack()
     job_id = action["value"]
     channel = body["channel"]["id"]
     ts = body["message"]["ts"]
+    store = Store()
+
+    prior = _already_acted(store, job_id)
+    if prior:
+        _replace_card(client, body, job_id, prior,
+                      "already handled — this click was ignored")
+        return
+
+    # Claim it in the UI immediately: the buttons vanish before the browser even
+    # starts, which is what stops a second click from starting a second apply.
+    store.set_pending_status(job_id, "in_progress")
+    _replace_card(client, body, job_id, "in_progress", "applying now…")
 
     def work() -> None:
-        client.chat_postMessage(channel=channel, thread_ts=ts,
-                                text=f"⏳ Applying to `{job_id}`…")
         try:
             result = workflows.apply_approved(job_id)
         except Exception as exc:  # noqa: BLE001
-            client.chat_postMessage(channel=channel, thread_ts=ts,
-                                    text=f"❌ `{job_id}` failed: `{exc}`")
+            store.set_pending_status(job_id, "pending")
+            _replace_card(client, body, job_id, "failed", f"`{exc}`"[:200])
             return
         if result.outcome is ApplyOutcome.SUBMITTED:
-            msg = f"✅ Submitted `{job_id}`."
-            try:
-                client.reactions_add(channel=channel, timestamp=ts, name="white_check_mark")
-            except Exception:  # noqa: BLE001
-                pass
+            _replace_card(client, body, job_id, "applied",
+                          "every answer was deterministic or human-supplied")
         elif result.outcome is ApplyOutcome.SKIPPED_CAP:
-            msg = f"🛑 `{job_id}` not submitted: 24h cap reached. It stays queued."
+            store.set_pending_status(job_id, "pending")
+            _replace_card(client, body, job_id, "pending",
+                          "24h cap reached — still queued, will retry")
         elif result.outcome is ApplyOutcome.SKIPPED_DUPLICATE:
-            msg = (f"⏭️ `{job_id}` is already being applied to right now "
-                   f"— ignoring the duplicate click.")
+            _replace_card(client, body, job_id, "in_progress",
+                          "already being applied to — duplicate ignored")
         else:
-            msg = f"⚠️ `{job_id}` ended as *{result.outcome.value}*: `{result.error[:300]}`"
-        client.chat_postMessage(channel=channel, thread_ts=ts, text=msg)
+            store.set_pending_status(job_id, "pending")
+            _replace_card(client, body, job_id, "failed",
+                          f"{result.outcome.value}: `{result.error[:200]}`")
 
     _bg(work)
 
@@ -84,10 +116,14 @@ def on_approve(ack, body, client, action):  # noqa: ANN001
 def on_reject(ack, body, client, action):  # noqa: ANN001
     ack()
     job_id = action["value"]
-    Store().set_pending_status(job_id, "rejected", note="rejected in Slack")
-    client.chat_postMessage(channel=body["channel"]["id"],
-                            thread_ts=body["message"]["ts"],
-                            text=f"❌ Rejected `{job_id}` — it will not be applied to.")
+    store = Store()
+    prior = _already_acted(store, job_id)
+    if prior:
+        _replace_card(client, body, job_id, prior,
+                      "already handled — this click was ignored")
+        return
+    store.set_pending_status(job_id, "rejected", note="rejected in Slack")
+    _replace_card(client, body, job_id, "rejected", "will not be applied to")
 
 
 @app.action("edit_answers")
@@ -116,9 +152,12 @@ def on_edit(ack, body, client, action):  # noqa: ANN001
             "hint": {"type": "plain_text",
                      "text": (a.get("reason") or "")[:140] or "your answer"},
         })
+    # private_metadata carries where the card lives, so submitting the modal can
+    # rewrite that exact message rather than leaving stale buttons behind.
+    meta = f"{job_id}|{body['channel']['id']}|{body['message']['ts']}"
     client.views_open(trigger_id=body["trigger_id"], view={
         "type": "modal", "callback_id": "answers_submitted",
-        "private_metadata": job_id,
+        "private_metadata": meta,
         "title": {"type": "plain_text", "text": "Answer questions"},
         "submit": {"type": "plain_text", "text": "Save & Apply"},
         "blocks": blocks,
@@ -128,7 +167,10 @@ def on_edit(ack, body, client, action):  # noqa: ANN001
 @app.view("answers_submitted")
 def on_answers(ack, body, view, client):  # noqa: ANN001
     ack()
-    job_id = view["private_metadata"]
+    meta = (view["private_metadata"] or "").split("|")
+    job_id = meta[0]
+    card_channel = meta[1] if len(meta) > 1 else None
+    card_ts = meta[2] if len(meta) > 2 else None
     store = Store()
     doc = store.get_pending(job_id) or {}
     values = view["state"]["values"]
@@ -151,25 +193,53 @@ def on_answers(ack, body, view, client):  # noqa: ANN001
                               "answered_at": now, "reason": ""}
                 break
 
-    store.set_pending_status(job_id, "approved", answers=updated)
+    store.set_pending_status(job_id, "in_progress", answers=updated)
     user = body["user"]["id"]
+
+    # Replace the card straight away so the buttons are gone while we work.
+    if card_channel and card_ts:
+        doc = store.get_pending(job_id) or {"job_id": job_id}
+        slack_notify.update_card(
+            card_channel, card_ts,
+            slack_notify.resolved_card(doc, "answered",
+                                       f"{len(typed)} answer(s) saved — applying now…"),
+            f"answered: {doc.get('title', job_id)}")
 
     def work() -> None:
         # Bank the new answers so the same question is silent next time. Banking is
         # refused for categories where retrieval is unsafe -- see answering.py.
         for q, val in typed:
             try:
-                learn_from_human(store, q, val)
+                # Salary goes to user_facts (a fact), everything else to the
+                # vector bank (a reusable answer). Salary must not be retrieved:
+                # "current" and "expected" look almost identical to an embedding.
+                field = learn_salary_fact(store, q, val)
+                if field:
+                    log.info("stored %s from your answer; salary will not be "
+                             "asked again", field)
+                else:
+                    learn_from_human(store, q, val)
             except Exception as exc:  # noqa: BLE001
-                log.warning("banking %r failed: %s", q[:50], exc)
+                log.warning("learning from %r failed: %s", q[:50], exc)
         try:
             result = workflows.apply_approved(job_id)
-            text = (f"✅ Submitted `{job_id}` with your answers."
-                    if result.outcome is ApplyOutcome.SUBMITTED
-                    else f"⚠️ `{job_id}`: *{result.outcome.value}* `{result.error[:250]}`")
+            ok = result.outcome is ApplyOutcome.SUBMITTED
+            verdict = "applied" if ok else "failed"
+            detail = ("submitted with your answers, which are now saved"
+                      if ok else f"{result.outcome.value}: `{result.error[:180]}`")
+            if not ok:
+                store.set_pending_status(job_id, "pending")
         except Exception as exc:  # noqa: BLE001
-            text = f"❌ `{job_id}` failed: `{exc}`"
-        client.chat_postMessage(channel=user, text=text)
+            verdict, detail = "failed", f"`{exc}`"[:200]
+            store.set_pending_status(job_id, "pending")
+        if card_channel and card_ts:
+            doc = store.get_pending(job_id) or {"job_id": job_id}
+            slack_notify.update_card(
+                card_channel, card_ts,
+                slack_notify.resolved_card(doc, verdict, detail),
+                f"{verdict}: {doc.get('title', job_id)}")
+        client.chat_postMessage(channel=user,
+                                text=f"{job_id}: {verdict} — {detail}")
 
     _bg(work)
 

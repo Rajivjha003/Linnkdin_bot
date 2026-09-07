@@ -91,24 +91,63 @@ def job_card(job: dict[str, Any], answers: list[dict[str, Any]]) -> list[dict]:
 
 
 def send_digest(pending: list[dict[str, Any]], stats: dict[str, Any]) -> str | None:
-    """One message for the whole run."""
+    """A short header, then ONE message per job.
+
+    Per-job messages rather than one batched message, so that clicking a button
+    can update exactly that card in place. With the batched layout a click left
+    the message unchanged, which made it impossible to tell whether you had acted
+    -- and led to the same job being clicked twice and two concurrent
+    applications starting.
+    """
     if not pending:
         return None
-    blocks: list[dict] = [{
-        "type": "header",
-        "text": {"type": "plain_text", "text": f"🎯 {len(pending)} job(s) awaiting review"},
-    }, {
-        "type": "context",
-        "elements": [{"type": "mrkdwn", "text":
-                      f"submitted last 24h: *{stats.get('submitted_24h', 0)}/{stats.get('cap', 20)}* · "
-                      f"searched: *{stats.get('searched', 0)}* · "
-                      f"scored: *{stats.get('scored', 0)}* · "
-                      f"bank: *{stats.get('bank_size', 0)}* entries"}],
-    }, {"type": "divider"}]
+    from agent.store import Store
+
+    header = post([
+        {"type": "header", "text": {"type": "plain_text",
+                                    "text": f"🎯 {len(pending)} job(s) awaiting review"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text":
+            f"submitted last 24h: *{stats.get('submitted_24h', 0)}/{stats.get('cap', 20)}* · "
+            f"searched: *{stats.get('searched', 0)}* · "
+            f"scored: *{stats.get('scored', 0)}* · "
+            f"answer bank: *{stats.get('bank_size', 0)}* entries"}]},
+    ], f"{len(pending)} job(s) awaiting review")
+
+    store = Store()
     for job in pending[:12]:
-        blocks.extend(job_card(job, job.get("answers", [])))
-    text = f"{len(pending)} job(s) awaiting review"
-    return post(blocks, text)
+        ts = post(job_card(job, job.get("answers", [])),
+                  f"{job.get('title', 'job')} — needs review")
+        if ts:
+            # Remember where this card lives so a click can rewrite it in place.
+            store.set_pending_status(job["job_id"], job.get("status", "pending"),
+                                     slack_ts=ts, slack_channel=_channel())
+    return header
+
+
+def resolved_card(job: dict[str, Any], verdict: str, detail: str = "") -> list[dict]:
+    """The card a job becomes once you have acted on it. No buttons."""
+    icons = {"approved": "✅", "applied": "✅", "rejected": "❌",
+             "answered": "✍️", "in_progress": "⏳", "failed": "⚠️"}
+    icon = icons.get(verdict, "•")
+    body = (f"{icon} *{verdict.replace('_', ' ').title()}* — "
+            f"<{job.get('url', '')}|{job.get('title', '(untitled)')}>\n"
+            f"{job.get('company', '')} · match {job.get('match_score', '-')}/100")
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": body}}]
+    if detail:
+        blocks.append({"type": "context",
+                       "elements": [{"type": "mrkdwn", "text": detail[:280]}]})
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def update_card(channel: str, ts: str, blocks: list[dict], text: str) -> bool:
+    """Rewrite a posted card in place. Removing the buttons is the point."""
+    try:
+        client().chat_update(channel=channel, ts=ts, blocks=blocks, text=text)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not update card %s/%s: %s", channel, ts, exc)
+        return False
 
 
 def send_auto_submitted(results: list[ApplyResult], jobs: dict[str, JobPosting]) -> None:

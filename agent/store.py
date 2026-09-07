@@ -212,6 +212,49 @@ class Store:
         return _txn(self.db.transaction())
 
     # ------------------------------------------------------------------ #
+    # Concurrency claim
+    # ------------------------------------------------------------------ #
+    def claim_for_apply(self, job_id: str, *, ttl_seconds: int = 600) -> bool:
+        """Atomically claim a job for applying. False means someone else has it.
+
+        Necessary because a double-click in Slack starts two handler threads, and
+        both would otherwise open a browser and race to the Submit button --
+        `record_attempt`'s transaction only protects the write, which happens after
+        the application has already been sent.
+
+        The claim expires after `ttl_seconds` so a crashed or killed run cannot
+        wedge a job permanently.
+        """
+        ref = self.db.collection(C_PENDING).document(str(job_id))
+
+        @firestore.transactional
+        def _txn(txn: firestore.Transaction) -> bool:
+            snap = ref.get(transaction=txn)
+            doc = (snap.to_dict() or {}) if snap.exists else {}
+            held = doc.get("apply_claim_at")
+            if held is not None:
+                try:
+                    age = (_now() - held).total_seconds()
+                except TypeError:
+                    age = ttl_seconds + 1  # unparseable => treat as stale
+                if age < ttl_seconds:
+                    return False
+                log.info("job %s claim was stale (%.0fs); taking it", job_id, age)
+            txn.set(ref, {"apply_claim_at": _now()}, merge=True)
+            return True
+
+        won = _txn(self.db.transaction())
+        if not won:
+            log.warning("job %s is already being applied to; refusing to start again",
+                        job_id)
+        return won
+
+    def release_apply_claim(self, job_id: str) -> None:
+        self.db.collection(C_PENDING).document(str(job_id)).set(
+            {"apply_claim_at": None}, merge=True
+        )
+
+    # ------------------------------------------------------------------ #
     # Review queue
     # ------------------------------------------------------------------ #
     def queue_for_review(

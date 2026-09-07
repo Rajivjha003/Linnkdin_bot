@@ -352,6 +352,15 @@ def apply_approved(job_id: str, *, headless: bool = True) -> ApplyResult:
         return ApplyResult(job_id=job_id, outcome=ApplyOutcome.SKIPPED_CAP,
                            error="24h submit cap reached")
 
+    # Exactly one caller may apply to a given job at a time. A double-click in
+    # Slack starts two handler threads, and without this both open a browser and
+    # race to Submit.
+    if not store.claim_for_apply(job_id):
+        return ApplyResult(
+            job_id=job_id, outcome=ApplyOutcome.SKIPPED_DUPLICATE,
+            error="another apply attempt for this job is already in progress",
+        )
+
     job = JobPosting(
         job_id=job_id, title=doc.get("title", ""), company=doc.get("company", ""),
         location=doc.get("location", ""), url=doc.get("url", ""),
@@ -368,14 +377,21 @@ def apply_approved(job_id: str, *, headless: bool = True) -> ApplyResult:
     if overrides:
         engine = _WithOverrides(engine, overrides)
 
-    with ApplyEngine(headless=headless, dry_run=False) as browser:
-        result = browser.apply(job, engine, store.get_profile().get(
-            "resume_linkedin_filename", ""), run_id=f"slack_{job_id}",
-            match_score=doc.get("match_score"))
+    try:
+        with ApplyEngine(headless=headless, dry_run=False) as browser:
+            result = browser.apply(job, engine, store.get_profile().get(
+                "resume_linkedin_filename", ""), run_id=f"slack_{job_id}",
+                match_score=doc.get("match_score"))
+    except Exception:
+        # Never leave the claim held on an unexpected failure, or the job is stuck
+        # until the TTL expires.
+        store.release_apply_claim(job_id)
+        raise
 
     if result.outcome is ApplyOutcome.AUTH_FAILURE:
         store.set_paused(True, reason="auth failure during approved apply")
         slack_notify.send_auth_failure(result.error)
+    store.release_apply_claim(job_id)
     store.record_attempt(job, result)
     # "Needs a human" must stay actionable. ABANDONED_NEEDS_REVIEW means the form
     # is blocked on an answer only the user can give -- salary, most often -- so it

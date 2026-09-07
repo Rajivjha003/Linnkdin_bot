@@ -70,6 +70,9 @@ def on_approve(ack, body, client, action):  # noqa: ANN001
                 pass
         elif result.outcome is ApplyOutcome.SKIPPED_CAP:
             msg = f"🛑 `{job_id}` not submitted: 24h cap reached. It stays queued."
+        elif result.outcome is ApplyOutcome.SKIPPED_DUPLICATE:
+            msg = (f"⏭️ `{job_id}` is already being applied to right now "
+                   f"— ignoring the duplicate click.")
         else:
             msg = f"⚠️ `{job_id}` ended as *{result.outcome.value}*: `{result.error[:300]}`"
         client.chat_postMessage(channel=channel, thread_ts=ts, text=msg)

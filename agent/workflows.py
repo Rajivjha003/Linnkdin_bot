@@ -295,7 +295,9 @@ def run_workflow_c() -> dict[str, Any]:
     jobs = store.recent_jobs(hours=24, limit=200)
     log.info("gap analysis over %d postings", len(jobs))
 
-    report = llm.resume_gap_report(jobs, profile.get("resume_text", ""))
+    # The corpus must be the roles actually targeted. Feeding in everything
+    # scraped produced a report about the Data Engineer market Rajiv had rejected.
+    report = llm.resume_gap_report(store, jobs, profile.get("resume_text", ""))
     payload = report.model_dump() if report else {
         "missing_skills": [], "summary": "Report unavailable.", "jobs_analyzed": len(jobs)
     }

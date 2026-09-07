@@ -160,6 +160,11 @@ def _structured(
     """
     client = config.genai_client()
 
+    # 2.5-pro refuses thinking_budget=0 outright ("The model does not support
+    # setting thinking_budget to 0"), so a blanket "thinking off" broke every Pro
+    # call. Only Flash can be told not to think.
+    can_disable_thinking = "flash" in model.lower()
+
     def build(tok: int, thinking: bool) -> types.GenerateContentConfig:
         kwargs: dict = dict(
             temperature=0.0,
@@ -167,7 +172,7 @@ def _structured(
             response_mime_type="application/json",
             response_schema=schema,
         )
-        if not thinking:
+        if not thinking and can_disable_thinking:
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
         return types.GenerateContentConfig(**kwargs)
 
@@ -373,7 +378,7 @@ def generalize_qa(question_text: str, answer_text: str) -> GeneralizedQA | None:
         config.MODEL_DEEP,
         _GENERALIZE_PROMPT.format(question=question_text[:1000], answer=answer_text[:2000]),
         GeneralizedQA,
-        max_tokens=2048,
+        max_tokens=8192,    # Pro always thinks; budget for it
     )
     if result is None:
         return None
@@ -394,36 +399,84 @@ def generalize_qa(question_text: str, answer_text: str) -> GeneralizedQA | None:
 # --------------------------------------------------------------------------- #
 # 4. Resume gap analysis (Workflow C, once a day)
 # --------------------------------------------------------------------------- #
-_GAP_PROMPT = """Below are {n} job postings the candidate was matched against in the
-last 24 hours, followed by their resume.
+_GAP_PROMPT = """Below is a gap analysis that has ALREADY been computed by
+string-matching a curated skill vocabulary against {n} job postings and against
+the candidate's resume. The analysis is authoritative.
 
-Identify the skills and experiences most frequently requested across these
-postings that the resume does NOT evidence. Rank by how often they appear.
-Return at most 10 in `missing_skills`, and a short factual `summary` (3-4
-sentences). Do not give career advice and do not speculate about salary.
+Your ONLY job is to write a short, factual summary of it, 3-4 sentences.
 
-=== POSTINGS ===
-{postings}
+Hard constraints:
+- Do NOT add any skill that is not in the list below.
+- Do NOT remove or reorder them; the counts are the ranking.
+- Do NOT claim a skill is missing if it appears under ALREADY ON THE RESUME.
+- Copy `missing_skills` through EXACTLY as given, same order.
+- No career advice, no salary speculation, no encouragement.
 
-=== RESUME ===
-{resume}
+ROLES ANALYSED (these are the only postings that count):
+{titles}
+
+MISSING FROM THE RESUME (skill — how many of the {n} postings ask for it):
+{gaps}
+
+ALREADY ON THE RESUME (do not call these gaps):
+{covered}
 """
 
 
-def resume_gap_report(postings: list[dict], resume_text: str) -> ResumeGapReport | None:
-    if not postings:
-        return ResumeGapReport(missing_skills=[], summary="No postings in the last 24 hours.",
-                               jobs_analyzed=0)
-    blob = "\n\n---\n\n".join(
-        f"{p.get('title','')} @ {p.get('company','')}\n{(p.get('jd_text') or '')[:2500]}"
-        for p in postings[:25]
-    )
+def resume_gap_report(store, postings: list[dict], resume_text: str,
+                      *, min_score: int = 40) -> ResumeGapReport | None:
+    """Gaps from code; prose from the model.
+
+    The model is given the computed gap list and forbidden from changing it. It
+    previously invented Databricks and Azure as gaps when both are on the resume,
+    and ranked Data Engineer skills top because the corpus included every posting
+    the user had rejected.
+    """
+    from agent import market
+
+    analysis = market.analyse(store, postings, resume_text, min_score=min_score)
+    gaps = analysis["gaps"]
+
+    if not analysis["analysed"]:
+        return ResumeGapReport(
+            missing_skills=[],
+            summary=("No relevant postings in this window. "
+                     f"{analysis['dropped']} were set aside as rejected, "
+                     "title-excluded, low-scoring or without a description."),
+            jobs_analyzed=0)
+    if not gaps:
+        return ResumeGapReport(
+            missing_skills=[],
+            summary=(f"Across {analysis['analysed']} relevant postings, every skill "
+                     "in the vocabulary already appears on the resume."),
+            jobs_analyzed=analysis["analysed"])
+
+    top = gaps[:10]
     result = _structured(
         config.MODEL_DEEP,
-        _GAP_PROMPT.format(n=len(postings), postings=blob[:120000], resume=resume_text[:12000]),
+        _GAP_PROMPT.format(
+            n=analysis["analysed"],
+            titles="\n".join(f"  - {t}" for t in analysis["titles"][:12]),
+            gaps="\n".join(f"  {g['skill']} — {g['postings']}" for g in top),
+            covered=", ".join(c["skill"] for c in analysis["covered"][:15]) or "(none)",
+        ),
         ResumeGapReport,
-        max_tokens=4096,
+        max_tokens=16384,   # Pro always thinks; leave room for it plus the JSON
     )
-    if result:
-        result.jobs_analyzed = len(postings)
+
+    computed = [g["skill"] for g in top]
+    if result is None:
+        # The facts stand on their own; the prose is a nicety.
+        return ResumeGapReport(
+            missing_skills=computed,
+            summary=(f"Across {analysis['analysed']} relevant postings, the most "
+                     f"frequently requested skills absent from the resume are: "
+                     f"{', '.join(computed[:5])}."),
+            jobs_analyzed=analysis["analysed"])
+
+    # Overwrite whatever the model produced for the list. It is not allowed a say.
+    if [x.strip() for x in result.missing_skills] != computed:
+        log.warning("gap model altered the skill list; restoring the computed one")
+    result.missing_skills = computed
+    result.jobs_analyzed = analysis["analysed"]
     return result

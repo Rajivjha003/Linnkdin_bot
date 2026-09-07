@@ -1,4 +1,35 @@
+# ---- SECRETS: never commit ----
 .env
+.env.*
+*.env
 credentials.json
+*-credentials.json
+service-account*.json
+*.pem
+*.key
+
+# ---- LinkedIn session state (contains li_at auth cookies) ----
+.linkedin-mcp/
+storage_state.json
+*session_state*.json
+patchright-browsers/
+
+# ---- runtime artifacts ----
+.venv/
+venv/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+logs/
+*.log
+exports/
+run_traces/
+probe_output/
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,64 @@
+# ── Paste-ready Slack app manifest ───────────────────────────────────────────
+# api.slack.com/apps -> Create New App -> From an app manifest -> pick workspace
+# -> choose YAML -> paste this whole file -> Next -> Create
+#
+# Socket Mode is enabled, so there are NO request URLs to configure and nothing
+# needs to be publicly reachable. Your PC connects outbound to Slack.
+display_information:
+  name: Job Agent
+  description: LinkedIn Easy Apply agent - review queue and controls
+  background_color: "#1a1d21"
+
+features:
+  bot_user:
+    display_name: Job Agent
+    always_online: false
+  slash_commands:
+    - command: /status
+      description: Applications in last 24h, cap remaining, pause state
+      should_escape: false
+    - command: /pause
+      description: Halt all applications immediately
+      should_escape: false
+    - command: /resume
+      description: Un-halt the agent
+      should_escape: false
+    - command: /apply_now
+      description: Trigger a run immediately instead of waiting for the schedule
+      should_escape: false
+    - command: /update_cookie
+      description: Paste a fresh li_at cookie after an auth failure
+      usage_hint: "<li_at value>"
+      should_escape: false
+    - command: /set_resume
+      description: Set which saved LinkedIn resume filename to select
+      usage_hint: "<exact filename as shown on LinkedIn>"
+      should_escape: false
+    - command: /update_resume
+      description: Replace the stored resume text used for scoring
+      should_escape: false
+    - command: /add_location
+      description: Add a search location
+      usage_hint: "<location>"
+      should_escape: false
+    - command: /set_threshold
+      description: Set match score (0-100) or vector threshold (0-1)
+      usage_hint: "match 70 | vector 0.85"
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write        # post the digest and alerts
+      - commands          # receive the slash commands above
+      - groups:read       # resolve the private #job-agent channel id
+      - files:write       # upload the 9pm XLSX directly
+      - reactions:write   # tick a card once handled
+      - im:write          # DM you on auth failure (high priority)
+
+settings:
+  interactivity:
+    is_enabled: true      # Approve / Reject / Edit Answer buttons
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

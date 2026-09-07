@@ -1,0 +1,24 @@
+# --- LinkedIn access (pinned: MCP server is search/scrape only, no apply tool) ---
+mcp-server-linkedin==4.23.3      # stickerdaniel; drives Patchright Chromium
+patchright>=1.55.0               # stealth Playwright fork; our apply engine too
+
+# --- Agent + LLM (AI Studio free tier, NOT Vertex) ---
+google-adk>=1.0.0
+google-genai>=1.0.0
+
+# --- GCP state ---
+google-cloud-firestore>=2.19.0
+google-cloud-storage>=2.18.0
+google-cloud-secret-manager>=2.20.0
+
+# --- Slack (Socket Mode: outbound WS, no public endpoint) ---
+slack-bolt>=1.21.0
+slack-sdk>=3.33.0
+
+# --- Harness ---
+pydantic>=2.9.0
+tenacity>=9.0.0
+python-dotenv>=1.0.1
+pypdf>=5.1.0
+pandas>=2.2.0
+openpyxl>=3.1.5

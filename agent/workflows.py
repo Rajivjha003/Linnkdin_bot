@@ -29,9 +29,11 @@ from agent.store import Store
 
 log = logging.getLogger("agent.workflows")
 
-#: How many postings to look up per run. Voyager is cheap (~200ms, no browser),
-#: so this is generous; the scarce budget is modal opens, not lookups.
-VOYAGER_LOOKUP_BUDGET = 80
+#: How many postings to look up per run. A Voyager call is ~200ms of HTTP with no
+#: browser, so 200 of them is about 40 seconds -- cheap enough that the only real
+#: constraint stays modal opens, which are capped separately. This was 80, which
+#: was too few once interleaving made deeper ids reachable.
+VOYAGER_LOOKUP_BUDGET = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -56,10 +58,24 @@ def prefilter(job: JobPosting, search_cfg: dict[str, Any]) -> tuple[bool, str]:
 # Workflow A
 # --------------------------------------------------------------------------- #
 async def _search_all(mcp: LinkedInMCP, cfg: dict[str, Any]) -> list[tuple[str, str]]:
-    found: dict[str, str] = {}
-    titles = cfg.get("titles", [])[:5]
-    locations = cfg.get("locations", [])[:2]
+    """All searches, interleaved so every search's page 1 comes first.
+
+    Order matters more than volume here. Measured on the live site: the first page
+    of a search runs about 27% Easy Apply with a median posting age of 0.2 days,
+    while the tail of a three-page search runs 0%. LinkedIn puts the freshest and
+    most relevant first and Easy Apply clusters there.
+
+    A flat concatenation therefore wastes the lookup budget: raising max_pages to
+    8 tripled the id count and collapsed yield tenfold, because deep-page ids from
+    the first search were looked up before page 1 of the eighth city. Sorting by
+    rank-within-search fixes that without discarding the deep pages -- they are
+    simply consulted last.
+    """
+    titles = cfg.get("titles", [])[:6]
+    locations = cfg.get("locations", [])[:8]
     levels = cfg.get("experience_levels") or [None]
+
+    ranked: dict[str, tuple[int, str]] = {}
     for title in titles:
         for loc in locations:
             try:
@@ -76,9 +92,19 @@ async def _search_all(mcp: LinkedInMCP, cfg: dict[str, Any]) -> list[tuple[str, 
                 log.warning("browser not ready, waiting once: %s", exc)
                 await asyncio.sleep(45)
                 continue
-            for jid, t in hits:
-                found.setdefault(jid, t)
-    return list(found.items())
+            for rank, (jid, t) in enumerate(hits):
+                # Keep the BEST rank seen: a job on page 1 of one city and page 6
+                # of another deserves the page-1 position.
+                prev = ranked.get(jid)
+                if prev is None or rank < prev[0]:
+                    ranked[jid] = (rank, t)
+
+    ordered = sorted(ranked.items(), key=lambda kv: kv[1][0])
+    log.info("%d unique ids across %d searches; best rank %s, worst %s",
+             len(ordered), len(titles) * len(locations),
+             ordered[0][1][0] if ordered else "-",
+             ordered[-1][1][0] if ordered else "-")
+    return [(jid, meta[1]) for jid, meta in ordered]
 
 
 def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,

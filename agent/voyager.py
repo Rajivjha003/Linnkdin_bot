@@ -132,6 +132,8 @@ class VoyagerClient:
             posted_text=str(d.get("listedAt") or ""),
             raw={
                 "apply_type": type_suffix,
+                "listed_at": d.get("listedAt"),
+                "age_days": _age_days(d.get("listedAt")),
                 "closed": bool(d.get("closed")),
                 "remote_allowed": bool(d.get("workRemoteAllowed")),
                 "applies": d.get("applies"),
@@ -153,6 +155,24 @@ class VoyagerClient:
         if self._session is not None:
             self._session.close()
             self._session = None
+
+
+def _age_days(listed_at: Any) -> float | None:
+    """Posting age in days from Voyager's listedAt (epoch milliseconds).
+
+    LinkedIn's own date filter is coarse -- past_week then straight to past_month
+    -- so a two-week window has to be enforced here.
+    """
+    if not listed_at:
+        return None
+    try:
+        import datetime as _dt
+
+        posted = _dt.datetime.fromtimestamp(int(listed_at) / 1000, _dt.timezone.utc)
+        return round((_dt.datetime.now(_dt.timezone.utc) - posted).total_seconds()
+                     / 86400, 1)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def apply_flow_url(job_id: str) -> str:

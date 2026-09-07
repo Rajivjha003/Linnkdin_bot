@@ -672,6 +672,18 @@ class ApplyEngine:
                 if submit is not None:
                     st.kind = "submit_reached"
                     blocking = result.blocking_answers()
+                    # A form with no real screening questions -- only contact
+                    # fields LinkedIn pre-fills -- carries no answer risk at all.
+                    # Nothing can be answered wrongly, so relevance is the only
+                    # thing at stake and a marginal match still merits applying.
+                    from agent.models import QuestionCategory as _QC
+
+                    real_questions = [
+                        a for a in result.answers
+                        if a.category not in (_QC.CONTACT, _QC.FOLLOW_COMPANY)
+                    ]
+                    if not real_questions:
+                        st.note = "no screening questions -- answer risk is nil"
                     if blocking:
                         st.action = "discarded"
                         st.note = f"{len(blocking)} answer(s) not auto-submittable"

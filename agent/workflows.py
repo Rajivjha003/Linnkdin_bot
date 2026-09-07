@@ -93,6 +93,7 @@ def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,
     summary: dict[str, Any] = {
         "run_id": run_id, "dry_run": dry_run, "searched": 0, "deduped": 0,
         "easy_apply": 0, "prefiltered": 0, "scored": 0, "above_threshold": 0,
+        "borderline": 0,
         "modals": 0, "submitted": 0,
         "queued": 0, "failed": 0, "aborted": "",
     }
@@ -159,6 +160,11 @@ def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,
                 continue
             if job.raw.get("closed"):
                 continue
+            age = job.raw.get("age_days")
+            if age is not None and age > config.MAX_POSTING_AGE_DAYS:
+                # LinkedIn's filter jumps from past_week to past_month, so the
+                # two-week window is enforced here instead.
+                continue
             if job.easy_apply:
                 ea_count += 1
             details[jid] = job
@@ -185,6 +191,7 @@ def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,
     # ---- score (model, borderline set only) ----------------------------- #
     threshold = int(cfg["match_score_threshold"])
     scored: list[tuple[JobPosting, int]] = []
+    borderline: list[tuple[JobPosting, int, str]] = []
     all_scores: list[dict[str, Any]] = []
     for job in candidates:
         sj = llm.score_job(job, resume_text)
@@ -196,10 +203,17 @@ def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,
                            "title": job.title[:60],
                            "reason": sj.one_line_reason[:120]})
         if sj.score < threshold:
+            # Borderline: worth his opinion rather than a silent drop. His verdict
+            # on these is the preference signal the filter has been missing.
+            if sj.score >= config.BORDERLINE_FLOOR:
+                borderline.append((job, sj.score, sj.one_line_reason))
+                continue
             store.record_attempt(job, ApplyResult(
                 job_id=job.job_id, outcome=ApplyOutcome.SKIPPED_LOW_SCORE,
                 match_score=sj.score, run_id=run_id,
-                error=f"score {sj.score} < {threshold}",
+                # Store WHY. "skipped_low_score" alone told him nothing and made
+                # it impossible to notice the scorer being unfair.
+                error=f"score {sj.score} < {threshold}: {sj.one_line_reason[:200]}",
                 threshold_at_skip=threshold,
             ))
             continue
@@ -249,6 +263,16 @@ def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,
                 steps.append({"step": "apply", "job_id": job.job_id,
                               "outcome": result.outcome.value, "score": score,
                               "error": result.error[:200]})
+
+    # ---- borderline: ask rather than discard ----------------------------- #
+    for job, score, why in borderline[: max(0, 6 - summary["queued"])]:
+        store.queue_for_review(job, [], score)
+        store.set_pending_status(job.job_id, "pending",
+                                 note=f"borderline {score}/{threshold}: {why[:200]}",
+                                 borderline=True)
+        summary["queued"] += 1
+    summary["borderline"] = len(borderline)
+    steps.append({"step": "borderline", "queued": len(borderline)})
 
     # ---- notify ---------------------------------------------------------- #
     try:

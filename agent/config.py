@@ -86,6 +86,17 @@ def mcp_env() -> dict[str, str]:
 # above these ceilings.
 # --------------------------------------------------------------------------- #
 HARD_MAX_SUBMITS_24H = 20
+
+#: A job with no screening questions carries no answer risk -- there is nothing
+#: that can be filled in wrongly -- so relevance is the only thing at stake and a
+#: marginal match still deserves an application.
+NO_QUESTIONS_SCORE_FLOOR = 45
+#: Below the main threshold but above this, a job is queued for review rather than
+#: dropped: his verdict on borderline jobs is the preference signal the filter
+#: needs, and dropping them silently produced none.
+BORDERLINE_FLOOR = 40
+#: LinkedIn has no two-week option, so we ask for past_month and cut at 14 days.
+MAX_POSTING_AGE_DAYS = 14
 HARD_MAX_MODAL_OPENS_24H = 40
 TIMEZONE = "Asia/Kolkata"
 

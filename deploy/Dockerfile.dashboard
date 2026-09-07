@@ -1,0 +1,47 @@
+# Dashboard only -- deliberately NOT the agent.
+#
+# The agent needs Patchright + Chromium (~1.5GB) and must run on a residential IP,
+# so it stays on the local machine. The dashboard only reads Firestore, so it fits
+# in a small image that scales to zero on Cloud Run and costs nothing when nobody
+# is looking at it.
+#
+# No credentials are baked in: on Cloud Run the service's own identity provides
+# Application Default Credentials, so the same code that uses credentials.json
+# locally uses the runtime identity here with no change.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Only what the dashboard actually imports. Notably absent: patchright,
+# mcp-server-linkedin, slack-bolt -- none of which the dashboard touches.
+RUN pip install --no-cache-dir \
+      "streamlit>=1.57" \
+      "pandas>=2.2.0" \
+      "google-cloud-firestore>=2.19.0" \
+      "google-cloud-storage>=2.18.0" \
+      "google-cloud-secret-manager>=2.20.0" \
+      "google-genai>=1.0.0" \
+      "pydantic>=2.9.0" \
+      "python-dotenv>=1.0.1" \
+      "pypdf>=5.1.0" \
+      "tenacity>=9.0.0"
+
+COPY agent/ /app/agent/
+COPY dashboard/ /app/dashboard/
+
+# Cloud Run supplies $PORT. Streamlit needs to be told to listen on all
+# interfaces, and its usage-stats phone-home is off because nothing here should
+# make outbound calls we did not ask for.
+ENV STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
+    STREAMLIT_SERVER_ENABLE_CORS=false \
+    STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=true
+
+EXPOSE 8080
+CMD exec streamlit run dashboard/streamlit_app.py \
+      --server.port=${PORT:-8080} \
+      --server.address=0.0.0.0

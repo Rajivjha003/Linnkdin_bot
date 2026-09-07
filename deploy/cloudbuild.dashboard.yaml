@@ -1,0 +1,20 @@
+# Build the dashboard image from deploy/Dockerfile.dashboard.
+#
+# An explicit build config rather than `gcloud run deploy --source`, because this
+# gcloud has no --dockerfile flag and the repo root deliberately has no Dockerfile
+# (the agent is not containerised -- it must run on a residential IP).
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - deploy/Dockerfile.dashboard
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/job-agent/dashboard:$SHORT_SHA
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/job-agent/dashboard:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/job-agent/dashboard:latest
+options:
+  logging: CLOUD_LOGGING_ONLY

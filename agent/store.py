@@ -32,6 +32,7 @@ C_APPLIED = "applied_jobs"
 C_BANK = "question_bank"
 C_PENDING = "pending_review"
 C_TRACES = "run_traces"
+C_USAGE = "llm_usage"
 DOC_ME = "me"
 
 
@@ -379,6 +380,49 @@ class Store:
                 "answer_text": d.get("answer_text", ""),
                 "category": d.get("category", ""),
             })
+        return out
+
+    # ------------------------------------------------------------------ #
+    # LLM cost, measured
+    # ------------------------------------------------------------------ #
+    def write_usage(self, run_id: str, total: dict[str, Any]) -> None:
+        self.db.collection(C_USAGE).document(run_id).set(
+            {**total, "created_at": _now()}, merge=True
+        )
+
+    def usage_rollup(self, days: int = 30) -> dict[str, Any]:
+        """Actual measured spend. Not an estimate and not the billing account.
+
+        Covers Vertex AI only, which is the sole line item that is not on a free
+        tier: Firestore, GCS, Secret Manager and Scheduler all sit inside their
+        always-free allowances at this volume.
+        """
+        cutoff = _now() - dt.timedelta(days=days)
+        out = {"runs": 0, "calls": 0, "prompt_tokens": 0, "output_tokens": 0,
+               "usd": 0.0, "by_purpose": {}}
+        for d in self.db.collection(C_USAGE).stream():
+            x = d.to_dict() or {}
+            created = x.get("created_at")
+            if created is not None:
+                try:
+                    if created < cutoff:
+                        continue
+                except TypeError:
+                    pass
+            out["runs"] += 1
+            out["calls"] += int(x.get("calls") or 0)
+            out["prompt_tokens"] += int(x.get("prompt_tokens") or 0)
+            out["output_tokens"] += int(x.get("output_tokens") or 0)
+            out["usd"] += float(x.get("usd") or 0.0)
+            for k, v in (x.get("by_purpose") or {}).items():
+                b = out["by_purpose"].setdefault(k, {"calls": 0, "usd": 0.0})
+                b["calls"] += int(v.get("calls") or 0)
+                b["usd"] += float(v.get("usd") or 0.0)
+        out["usd"] = round(out["usd"], 6)
+        if out["runs"]:
+            out["usd_per_run"] = round(out["usd"] / out["runs"], 6)
+            # 7 scheduled runs a day at the current cadence.
+            out["projected_usd_per_month"] = round(out["usd_per_run"] * 7 * 30, 4)
         return out
 
     # ------------------------------------------------------------------ #

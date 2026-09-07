@@ -265,6 +265,9 @@ def run_workflow_a(*, dry_run: bool | None = None, headless: bool = True,
     except Exception as exc:  # noqa: BLE001
         log.warning("slack notification failed (run itself succeeded): %s", exc)
 
+    usage = llm.flush_usage(store, run_id)
+    summary["llm_calls"] = usage.get("calls", 0)
+    summary["llm_usd"] = usage.get("usd", 0.0)
     store.write_trace(run_id, steps, summary)
     log.info("run %s done: %s", run_id, summary)
     return summary

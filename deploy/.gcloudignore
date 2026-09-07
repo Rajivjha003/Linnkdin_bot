@@ -1,0 +1,19 @@
+# Keep the build context tiny and, more importantly, keep secrets out of it.
+.venv/
+.browsers/
+.linkedin-mcp/
+.tmp/
+run_traces/
+probe_output/
+logs/
+exports/
+__pycache__/
+*.pyc
+.env
+.env.*
+credentials.json
+*.log
+.git/
+tests/
+setup/
+Resume/

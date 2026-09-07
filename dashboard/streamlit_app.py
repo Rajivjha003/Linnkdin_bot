@@ -29,9 +29,52 @@ import streamlit as st
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from agent import config  # noqa: E402
 from agent.store import Store  # noqa: E402
 
 st.set_page_config(page_title="Job Agent", page_icon="🎯", layout="wide")
+
+# --------------------------------------------------------------------------- #
+# Access gate
+# --------------------------------------------------------------------------- #
+# This page shows every posting seen, every score, and salary expectations. On a
+# public Cloud Run URL that would be readable by anyone who guessed the hostname,
+# so a shared password is required. Set DASHBOARD_NO_AUTH=1 to skip it locally.
+def _gate() -> bool:
+    import os
+
+    if os.getenv("DASHBOARD_NO_AUTH") == "1":
+        return True
+    if st.session_state.get("_authed"):
+        return True
+    try:
+        expected = config.secret("dashboard-password")
+    except Exception:
+        # No password configured => refuse rather than default to open.
+        st.error("No dashboard password is configured. Set the "
+                 "`dashboard-password` secret in Secret Manager.", icon="🔒")
+        return False
+
+    st.title("🎯 Job Agent")
+    st.caption("Enter the dashboard password.")
+    with st.form("gate"):
+        pw = st.text_input("Password", type="password")
+        if st.form_submit_button("Open", type="primary"):
+            # Constant-time compare: a length/prefix leak here is pointless risk.
+            import hmac
+
+            if hmac.compare_digest(pw, expected):
+                st.session_state["_authed"] = True
+                st.rerun()
+            else:
+                st.error("Wrong password.", icon="🚫")
+    return False
+
+
+if not _gate():
+    st.stop()
+
+
 
 # Validated palettes -- see module docstring. Fixed order, never cycled.
 PROV_LIGHT = {"deterministic": "#2a78d6", "bank_match": "#eb6834",
@@ -468,5 +511,48 @@ with st.container(border=True):
             }),
             hide_index=True, width="stretch",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Cost, measured
+# --------------------------------------------------------------------------- #
+@st.cache_data(ttl="120s")
+def load_cost() -> dict:
+    return store().usage_rollup(days=30)
+
+
+with st.container(border=True):
+    st.subheader("Cost")
+    cost = load_cost()
+    if not cost.get("runs"):
+        st.info(
+            "No token usage recorded yet. Accounting starts from the next run — "
+            "every Vertex call now logs its actual prompt and output tokens."
+        )
+    else:
+        with st.container(horizontal=True):
+            st.metric("Spent (30d, measured)", f"${cost['usd']:.4f}", border=True)
+            st.metric("Projected / month",
+                      f"${cost.get('projected_usd_per_month', 0):.2f}",
+                      "at 7 runs/day", border=True, delta_color="off")
+            st.metric("LLM calls", cost["calls"], border=True)
+            st.metric("Tokens in / out",
+                      f"{cost['prompt_tokens']:,} / {cost['output_tokens']:,}",
+                      border=True)
+        if cost.get("by_purpose"):
+            st.dataframe(
+                pd.DataFrame([
+                    {"what": k, "calls": v["calls"], "usd": f"${v['usd']:.5f}"}
+                    for k, v in sorted(cost["by_purpose"].items(),
+                                       key=lambda kv: -kv[1]["usd"])
+                ]), hide_index=True, width="stretch",
+            )
+    st.caption(
+        "Vertex AI is the only line item outside an always-free allowance. "
+        "Firestore (1 GiB, 50k reads/day), GCS (5 GiB in us-central1), Secret "
+        "Manager and this Cloud Run service (scale-to-zero, 2M requests/month) "
+        "are all inside theirs. Measured from real token counts, not estimated — "
+        "the billing account itself needs an IAM grant this service does not have."
+    )
 
 st.caption("Reads Firestore directly · caches for 60s · $0 to run")

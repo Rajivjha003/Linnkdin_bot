@@ -20,7 +20,12 @@ load_dotenv(ROOT / ".env")
 # --------------------------------------------------------------------------- #
 PROJECT_ID = os.getenv("GCP_PROJECT", "master-rajiv")
 CREDENTIALS_PATH = str(ROOT / "credentials.json")
-os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", CREDENTIALS_PATH)
+# Only pin the key file when it is actually present. On Cloud Run it is not, and
+# the service's own identity supplies Application Default Credentials -- but
+# pointing GOOGLE_APPLICATION_CREDENTIALS at a missing path makes the client
+# libraries fail outright instead of falling back to it.
+if pathlib.Path(CREDENTIALS_PATH).exists():
+    os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", CREDENTIALS_PATH)
 
 FIRESTORE_DATABASE = "(default)"
 GCS_BUCKET = os.getenv("GCS_BUCKET", "master-rajiv-linkedin-agent-exports")

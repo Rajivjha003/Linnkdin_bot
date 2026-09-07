@@ -34,6 +34,61 @@ from agent.models import (
 log = logging.getLogger("agent.llm")
 T = TypeVar("T", bound=BaseModel)
 
+# Vertex AI list prices, USD per 1,000,000 tokens. Kept as visible constants so a
+# price change is a one-line edit rather than a mystery.
+PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
+    # model            (input, output)
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-embedding-001": (0.15, 0.00),
+}
+
+#: Accumulated in-process; flushed to Firestore by `flush_usage()` at run end.
+_USAGE: list[dict] = []
+
+
+def record_usage(model: str, prompt_tokens: int, output_tokens: int,
+                 purpose: str) -> None:
+    """Note what one call actually consumed."""
+    inp, out = PRICE_PER_MTOK.get(model, (0.0, 0.0))
+    cost = (prompt_tokens / 1e6) * inp + (output_tokens / 1e6) * out
+    _USAGE.append({
+        "model": model, "purpose": purpose,
+        "prompt_tokens": int(prompt_tokens), "output_tokens": int(output_tokens),
+        "usd": round(cost, 8),
+    })
+
+
+def pending_usage() -> list[dict]:
+    return list(_USAGE)
+
+
+def flush_usage(store, run_id: str) -> dict:
+    """Write this run's token usage to Firestore and clear the buffer."""
+    if not _USAGE:
+        return {"calls": 0, "usd": 0.0}
+    total = {
+        "run_id": run_id,
+        "calls": len(_USAGE),
+        "prompt_tokens": sum(u["prompt_tokens"] for u in _USAGE),
+        "output_tokens": sum(u["output_tokens"] for u in _USAGE),
+        "usd": round(sum(u["usd"] for u in _USAGE), 6),
+        "by_purpose": {},
+    }
+    for u in _USAGE:
+        b = total["by_purpose"].setdefault(u["purpose"], {"calls": 0, "usd": 0.0})
+        b["calls"] += 1
+        b["usd"] = round(b["usd"] + u["usd"], 8)
+    try:
+        store.write_usage(run_id, total)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not persist usage: %s", exc)
+    _USAGE.clear()
+    log.info("run %s used %d calls, %d in / %d out tokens, $%.5f",
+             run_id, total["calls"], total["prompt_tokens"],
+             total["output_tokens"], total["usd"])
+    return total
+
 
 # --------------------------------------------------------------------------- #
 # Embeddings
@@ -64,6 +119,9 @@ def embed(texts: list[str]) -> list[list[float]]:
             "task_type": "SEMANTIC_SIMILARITY",
         },
     )
+    # Embeddings are billed on input tokens; ~4 chars/token is the usual rule.
+    record_usage(config.MODEL_EMBED,
+                 sum(len(t) for t in texts) // 4, 0, purpose="embed")
     return [_unit(list(e.values)) for e in resp.embeddings]
 
 
@@ -88,6 +146,11 @@ def _structured(
     for attempt in (1, 2):
         try:
             resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
+            um = getattr(resp, "usage_metadata", None)
+            if um is not None:
+                record_usage(model, getattr(um, "prompt_token_count", 0) or 0,
+                             getattr(um, "candidates_token_count", 0) or 0,
+                             purpose=schema.__name__)
             parsed = getattr(resp, "parsed", None)
             if isinstance(parsed, schema):
                 return parsed

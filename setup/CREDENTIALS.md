@@ -78,13 +78,16 @@ recovery steps, with `/update_cookie` as the manual fallback.
 | GCS `master-rajiv-linkedin-agent-exports`, `us-central1` | ✅ created, 30-day lifecycle |
 | Vector index `question_bank.question_embedding` (1536, flat) | ✅ created |
 | `apikeys.googleapis.com` | ✅ enabled by me (this was blocking) |
-| Gemini API key, restricted to `generativelanguage` | ✅ minted by me, **validated** |
-| Secret Manager: `gemini-api-key` | ✅ real value stored |
+| ~~Gemini AI Studio key~~ | ⚠️ **dead end** — AI Studio returns `429: prepayment credits are depleted` on billing-enabled projects. No free tier available. |
+| **Vertex AI** `gemini-2.5-flash` / `2.5-pro` / `gemini-embedding-001` | ✅ **verified working** via your service account at `location=global`; draws on the $300 credit (~$2–7/mo) |
+| Secret Manager: `gemini-api-key` | ✅ stored but **unused** (Vertex authenticates via the SA) |
 | Secret Manager: `slack-bot-token`, `slack-app-token`, `linkedin-li-at` | ⏳ placeholders awaiting §1 |
 
-Your old `.env` had a `GOOGLE_API_KEY` that returned **403** — unusable. I minted a fresh key
-scoped to only the Generative Language API rather than reusing it. Your existing `.env` was
-left untouched; it belongs to a different project (Groq, Langfuse, pilot UI).
+Your old `.env` had a `GOOGLE_API_KEY` that returned **403**. I minted a fresh restricted key
+— which then returned **429, prepayment credits depleted**, revealing that AI Studio has no
+free tier on a billing-enabled project. So the LLM path switched to **Vertex AI**, which needs
+no key at all: it authenticates with the service account you already gave me. Your existing
+`.env` was left untouched; it belongs to a different project (Groq, Langfuse, pilot UI).
 
 ---
 
@@ -92,7 +95,9 @@ left untouched; it belongs to a different project (Groq, Langfuse, pilot UI).
 
 - **GitHub** — already configured, nothing needed.
 - **Proxy** — not needed; Shape B runs on your home IP by design.
-- **Vertex AI** — deliberately unused (no free tier for Gemini; AI Studio has one).
+- **Gemini / Vertex API key** — none needed; Vertex authenticates with your service account.
+- **AI Studio credits** — not needed, and not worth buying: Vertex on the $300 credit is
+  cheaper for you than topping up AI Studio prepay.
 - **Cloud Run / Scheduler / Pub/Sub** — deliberately unused (see `SPEC.md` §0).
 
 ---

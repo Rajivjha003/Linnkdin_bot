@@ -1,0 +1,168 @@
+"""Outbound Slack: the batched digest, auth alerts, and the daily report.
+
+Digests are batched -- one message per run, with a Block Kit card per job -- rather
+than one message per job, because a stream of notifications is the fastest way to
+make a human stop reading them.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from slack_sdk import WebClient
+
+from agent import config
+from agent.models import ApplyResult, JobPosting, Provenance
+
+log = logging.getLogger("agent.slack")
+
+_PROV_ICON = {
+    Provenance.DETERMINISTIC.value: "🔒",
+    Provenance.BANK_MATCH.value: "📚",
+    Provenance.HUMAN.value: "🙋",
+    Provenance.LLM.value: "⚠️",
+}
+
+
+def client() -> WebClient:
+    return WebClient(token=config.secret("slack-bot-token"))
+
+
+def _channel() -> str:
+    return config.SLACK_CHANNEL
+
+
+def post(blocks: list[dict], text: str, channel: str | None = None) -> str | None:
+    try:
+        resp = client().chat_postMessage(
+            channel=channel or _channel(), blocks=blocks, text=text, unfurl_links=False
+        )
+        return resp.get("ts")
+    except Exception as exc:  # noqa: BLE001
+        log.error("slack post failed: %s", exc)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+def job_card(job: dict[str, Any], answers: list[dict[str, Any]]) -> list[dict]:
+    """One reviewable job. Blocking answers are shown with why they blocked."""
+    score = job.get("match_score")
+    header = f"*<{job.get('url','')}|{job.get('title','(untitled)')}>*\n{job.get('company','')} · {job.get('location','')}"
+    if score is not None:
+        header += f"\n*Match:* {score}/100"
+
+    blocking = [a for a in answers if a.get("provenance") in ("llm",) or not a.get("value")]
+    lines = []
+    for a in answers:
+        icon = _PROV_ICON.get(a.get("provenance", ""), "•")
+        val = a.get("value") or "_needs your answer_"
+        q = (a.get("question_text") or "")[:110]
+        line = f"{icon} *{q}*\n     {val}"
+        if a.get("reason"):
+            line += f"\n     _{a['reason'][:120]}_"
+        lines.append(line)
+
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+    ]
+    if lines:
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": "\n".join(lines)[:2900]}})
+    blocks.append({
+        "type": "actions",
+        "block_id": f"job_{job.get('job_id')}",
+        "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Apply"},
+             "style": "primary", "action_id": "approve",
+             "value": str(job.get("job_id"))},
+            {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
+             "action_id": "reject", "value": str(job.get("job_id"))},
+            {"type": "button", "text": {"type": "plain_text", "text": "✏️ Answer questions"},
+             "action_id": "edit_answers", "value": str(job.get("job_id"))},
+        ],
+    })
+    if blocking:
+        blocks.append({"type": "context", "elements": [{
+            "type": "mrkdwn",
+            "text": f"⚠️ {len(blocking)} question(s) need your answer before this can be submitted",
+        }]})
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def send_digest(pending: list[dict[str, Any]], stats: dict[str, Any]) -> str | None:
+    """One message for the whole run."""
+    if not pending:
+        return None
+    blocks: list[dict] = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": f"🎯 {len(pending)} job(s) awaiting review"},
+    }, {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text":
+                      f"submitted last 24h: *{stats.get('submitted_24h', 0)}/{stats.get('cap', 20)}* · "
+                      f"searched: *{stats.get('searched', 0)}* · "
+                      f"scored: *{stats.get('scored', 0)}* · "
+                      f"bank: *{stats.get('bank_size', 0)}* entries"}],
+    }, {"type": "divider"}]
+    for job in pending[:12]:
+        blocks.extend(job_card(job, job.get("answers", [])))
+    text = f"{len(pending)} job(s) awaiting review"
+    return post(blocks, text)
+
+
+def send_auto_submitted(results: list[ApplyResult], jobs: dict[str, JobPosting]) -> None:
+    """Notify about applications that cleared the gate without a human."""
+    if not results:
+        return
+    lines = []
+    for r in results:
+        j = jobs.get(r.job_id)
+        title = j.title if j else r.job_id
+        company = j.company if j else ""
+        url = j.url if j else ""
+        lines.append(f"• <{url}|{title}> — {company} (match {r.match_score or '-'}/100)")
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text",
+                                    "text": f"✅ {len(results)} application(s) submitted"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)[:2900]}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text":
+            "🔒 every answer was deterministic or a banked match — no model-authored answers"}]},
+    ]
+    post(blocks, f"{len(results)} application(s) submitted")
+
+
+def send_auth_failure(detail: str) -> None:
+    """Workflow D. Also DMs, because this halts everything until fixed."""
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "🚨 AUTH FAILURE — agent paused"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text":
+            "*LinkedIn session is no longer valid. All applications are halted.*\n\n"
+            "*To fix:*\n"
+            "1. Log in to LinkedIn in Chrome\n"
+            "2. `F12` → Application → Cookies → `https://www.linkedin.com`\n"
+            "3. Copy the *Value* of the `li_at` cookie\n"
+            "4. Run `/update_cookie <value>` here\n\n"
+            f"_Detail:_ `{detail[:300]}`"}},
+    ]
+    post(blocks, "AUTH FAILURE — agent paused")
+
+
+def send_gap_report(report: dict[str, Any], file_url: str | None) -> None:
+    skills = report.get("missing_skills") or []
+    text = "*Most-requested skills missing from your resume:*\n" + "\n".join(
+        f"{i}. {s}" for i, s in enumerate(skills, 1)
+    ) if skills else "_No gaps identified._"
+    blocks: list[dict] = [
+        {"type": "header", "text": {"type": "plain_text", "text": "📊 Daily resume gap report"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": text[:2900]}},
+    ]
+    if report.get("summary"):
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": f"_{report['summary'][:1500]}_"}})
+    if file_url:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": f"📄 <{file_url}|Download job data (link expires in 1 hour)>"}})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+                   "text": f"based on {report.get('jobs_analyzed', 0)} posting(s) in the last 24h"}]})
+    post(blocks, "Daily resume gap report")

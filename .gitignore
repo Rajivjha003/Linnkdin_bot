@@ -13,6 +13,7 @@ service-account*.json
 storage_state.json
 *session_state*.json
 patchright-browsers/
+.browsers/
 
 # ---- runtime artifacts ----
 .venv/

@@ -145,7 +145,7 @@ Database: `(default)`, Native mode, `asia-south1`.
 | `expected_ctc_lpa` | number | **20** (floor 16; you said >13, market says anchor higher) | **you** + market |
 | `willing_to_relocate` | bool | `true` | **you** |
 | `relocate_scope` | string | `anywhere_in_india` | **you** |
-| `skill_years` | map | see below — **DERIVED, NEEDS YOUR SIGN-OFF** | derived from role dates |
+| `skill_years` | map | see below — **total 4y CONFIRMED by you 2026-09-07** | derived from role dates |
 
 `skill_years` derived strictly from employment dates, never guessed:
 ```
@@ -196,6 +196,11 @@ Vector index: `question_bank.question_embedding`, **dimension 1536, type flat**
 we request `output_dimensionality=1536` via MRL and **re-normalize to unit length**, or
 cosine distances come out subtly wrong).
 
+> **Measured:** a raw 1536-dim MRL-truncated vector came back with **L2 norm = 0.6935**, not
+> 1.0. Re-normalization is therefore required, confirmed against the live API rather than
+> assumed. `find_nearest(COSINE, distance_threshold=0.20)` was verified to return exactly the
+> docs with similarity ≥ 0.80 and exclude the rest.
+
 ### `pending_review/{job_id}` and `run_traces/{run_id}`
 `pending_review`: job snapshot + `questions[]` + `status (pending|approved|rejected|expired)`
 + `slack_message_ts`. `run_traces`: full step-by-step trace for debugging.
@@ -210,9 +215,9 @@ cosine distances come out subtly wrong).
 | **All numerics** (years, salary, notice) | **Code** — regex → `user_facts` → arithmetic | The model never sees or emits a number |
 | Work auth / sponsorship / relocation | **Code** — canonical-ID lookup | Opposite-meaning questions, zero tolerance |
 | Modal navigation | **Explicit state machine** | Not LLM-driven clicking |
-| Job scoring | Gemini 2.5 Flash, borderline set only | Cuts calls and hallucination surface |
-| Question → category | Gemini 2.5 Flash, **enum-constrained** | Classification, not generation |
-| Q&A generalization, resume gap analysis | Gemini 2.5 Pro | Real language tasks, low volume, non-safety-critical |
+| Job scoring | Vertex AI `gemini-2.5-flash`, borderline set only | Cuts calls and hallucination surface |
+| Question → category | Vertex AI `gemini-2.5-flash`, **enum-constrained** | Classification, not generation |
+| Q&A generalization, resume gap analysis | Vertex AI `gemini-2.5-pro` | Real language tasks, low volume, non-safety-critical |
 
 **Harness rules.** Every LLM call: Pydantic schema + `response_mime_type=application/json`,
 validated on return, retried on validation failure, and **fails to human review rather than
@@ -224,12 +229,24 @@ a Firestore transaction, so a retry can never double-apply.
 
 ## 6. Always-human-review blocklist
 
-These bypass the vector bank entirely, regardless of match score:
+These bypass the vector bank entirely, regardless of match score.
 
-- **Work authorization / visa sponsorship** — `"Do you require sponsorship?"` and
-  `"Are you authorized to work?"` are semantically near-identical (easy ≥0.80 match) but the
-  correct answers are **opposite**. A wrong auto-answer here is a disqualified application or
-  a false legal statement.
+> **This is now empirically proven, not a hunch.** Measured with the real
+> `gemini-embedding-001` @1536, unit-normalized:
+>
+> | Pair | Cosine similarity |
+> |---|---|
+> | `"How many years of Python experience..."` vs near-duplicate phrasing | **0.9979** ← true match |
+> | `"Are you legally authorized to work in India?"` vs `"Do you require visa sponsorship to work in India?"` | **0.9097** ← **opposite correct answers** |
+>
+> The dangerous false match scores **0.91** — far above the 0.80 threshold. Worse, only
+> **0.08** separates it from a genuine match, so **no threshold value can separate them**:
+> raising the bar to 0.95 would kill legitimate matches while barely helping. A similarity
+> gate is structurally incapable of catching this class of error. The blocklist is therefore
+> **mandatory, not defence-in-depth.**
+
+- **Work authorization / visa sponsorship** — see the measurement above. A wrong auto-answer
+  here is a disqualified application or a false legal statement.
 - **Salary** (current, expected, rate) — a wrong number is permanent.
 - **Notice period.**
 - **Any numeric years-of-experience for a skill not in `skill_years`.**
@@ -262,3 +279,5 @@ Plus one sign-off: the `skill_years` map in §4.
 - **Phase 3** — scoring + vector bank + embeddings
 - **Phase 4** — Slack Socket Mode, Block Kit cards, slash commands
 - **Phase 5** — Workflow C export, Task Scheduler registration, end-to-end dry run
+- **Phase 6** — Streamlit monitoring dashboard (local, reads Firestore, $0)
+- **Phase 7** — live test: 5 real applications, dry-run reviewed first (see `setup/CREDENTIALS.md` §6)

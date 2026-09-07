@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import time
 from typing import TypeVar
 
 from google.genai import types
@@ -128,39 +130,99 @@ def embed(texts: list[str]) -> list[list[float]]:
 # --------------------------------------------------------------------------- #
 # Structured generation harness
 # --------------------------------------------------------------------------- #
-def _structured(
-    model: str, prompt: str, schema: type[T], *, max_tokens: int = 4096
-) -> T | None:
-    """One schema-constrained call, validated, single retry, then None.
+#: Counts why calls fail, so a silent 37% loss can never happen unnoticed again.
+FAILURES: dict[str, int] = {}
 
-    None is the honest answer when the model cannot produce a valid object. The
-    caller must treat it as "ask a human", never as a default value.
+
+def _note_failure(kind: str) -> None:
+    FAILURES[kind] = FAILURES.get(kind, 0) + 1
+
+
+def _structured(
+    model: str,
+    prompt: str,
+    schema: type[T],
+    *,
+    max_tokens: int = 8192,
+    think: bool = False,
+    attempts: int = 3,
+) -> T | None:
+    """One schema-constrained call, validated, with retries, then None.
+
+    `think=False` by default and it matters. Gemini 2.5 spends "thinking" tokens
+    out of max_output_tokens; a 6,647-character job description burned 3,931 of
+    them, hit MAX_TOKENS, truncated the JSON and failed validation. These are
+    rubric tasks with a fixed output shape, so thinking bought nothing and cost
+    ~1,900 tokens a call.
+
+    None remains the honest answer when no valid object can be produced -- callers
+    treat it as "ask a human", never as a default.
     """
     client = config.genai_client()
-    cfg = types.GenerateContentConfig(
-        temperature=0.0,
-        max_output_tokens=max_tokens,
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
-    for attempt in (1, 2):
+
+    def build(tok: int, thinking: bool) -> types.GenerateContentConfig:
+        kwargs: dict = dict(
+            temperature=0.0,
+            max_output_tokens=tok,
+            response_mime_type="application/json",
+            response_schema=schema,
+        )
+        if not thinking:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        return types.GenerateContentConfig(**kwargs)
+
+    tokens = max_tokens
+    thinking = think
+    for attempt in range(1, attempts + 1):
         try:
-            resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
+            resp = client.models.generate_content(
+                model=model, contents=prompt, config=build(tokens, thinking))
             um = getattr(resp, "usage_metadata", None)
             if um is not None:
                 record_usage(model, getattr(um, "prompt_token_count", 0) or 0,
-                             getattr(um, "candidates_token_count", 0) or 0,
+                             (getattr(um, "candidates_token_count", 0) or 0)
+                             + (getattr(um, "thoughts_token_count", 0) or 0),
                              purpose=schema.__name__)
+
+            # Truncation is a budget problem, not a model failure. Name it and
+            # grow the budget rather than reporting a confusing validation error.
+            finish = ""
+            if getattr(resp, "candidates", None):
+                finish = str(getattr(resp.candidates[0], "finish_reason", "") or "")
+            if "MAX_TOKENS" in finish:
+                _note_failure("max_tokens_truncated")
+                log.warning("%s hit MAX_TOKENS (attempt %d, budget %d); retrying "
+                            "with a larger budget and no thinking", model, attempt, tokens)
+                tokens = min(32768, tokens * 2)
+                thinking = False
+                continue
+
             parsed = getattr(resp, "parsed", None)
             if isinstance(parsed, schema):
                 return parsed
             if resp.text:
                 return schema.model_validate_json(resp.text)
+            _note_failure("no_content")
             log.warning("%s returned no parseable content (attempt %d)", model, attempt)
+
         except (ValidationError, ValueError) as exc:
-            log.warning("%s schema validation failed (attempt %d): %s", model, attempt, str(exc)[:200])
+            _note_failure("schema_invalid")
+            log.warning("%s schema validation failed (attempt %d): %s",
+                        model, attempt, str(exc)[:200])
         except Exception as exc:  # noqa: BLE001
-            log.warning("%s call failed (attempt %d): %s", model, attempt, str(exc)[:200])
+            text = str(exc)
+            # A rate limit needs waiting, not an immediate retry -- which is what
+            # made 16 of these fatal.
+            if "RESOURCE_EXHAUSTED" in text or "429" in text:
+                _note_failure("rate_limited")
+                wait = min(30.0, 2.0 ** attempt)
+                log.warning("%s rate limited (attempt %d); backing off %.0fs",
+                            model, attempt, wait)
+                time.sleep(wait)
+                continue
+            _note_failure("call_failed")
+            log.warning("%s call failed (attempt %d): %s", model, attempt, text[:200])
+    log.error("%s gave up after %d attempts for %s", model, attempts, schema.__name__)
     return None
 
 
@@ -209,24 +271,51 @@ def score_job(job: JobPosting, resume_text: str) -> ScoredJob | None:
             jd=job.jd_text[:14000],
         ),
         ScoredJob,
+        max_tokens=8192,
     )
     if result is None:
         return None
+
+    # Evidence is demanded of a claimed MATCH, not of a claimed rejection.
+    #
+    # A high score with nothing to quote is the hallucination case this check
+    # exists for. A low score with nothing to quote is simply correct: there is
+    # nothing in a Material Science posting to cite in favour of an AI engineer.
+    # Treating both as failures dropped genuinely-bad matches into a silent hole
+    # instead of recording them as "scored too low", which made the funnel look
+    # broken when it was working.
+    EVIDENCE_REQUIRED_ABOVE = 40
     if not result.evidence_spans:
-        log.info("job %s scored %d with no evidence -> discarding score",
+        if result.score >= EVIDENCE_REQUIRED_ABOVE:
+            log.info("job %s claims %d but cites nothing -> discarding as unsound",
+                     job.job_id, result.score)
+            return None
+        log.info("job %s scored %d with nothing to cite -- a confident no, kept",
                  job.job_id, result.score)
-        return None
-    # Verify the quotes actually appear in the posting. A hallucinated quote
-    # invalidates the score exactly as an absent one does.
-    haystack = " ".join((job.jd_text + " " + job.title).lower().split())
-    grounded = [
-        s for s in result.evidence_spans
-        if " ".join(s.lower().split())[:80] in haystack
-    ]
+        return result
+    # Verify the quotes really came from the posting -- a hallucinated quote
+    # invalidates a score exactly as an absent one does. But match on token
+    # overlap rather than a verbatim 80-character prefix: the strict version threw
+    # away 7 otherwise sound scores because the model tidied whitespace or
+    # punctuation while quoting accurately.
+    haystack = set(re.findall(r"[a-z0-9]+", (job.jd_text + " " + job.title).lower()))
+    grounded = []
+    for span in result.evidence_spans:
+        words = re.findall(r"[a-z0-9]+", span.lower())
+        if not words:
+            continue
+        overlap = sum(1 for w in words if w in haystack) / len(words)
+        if overlap >= 0.7:
+            grounded.append(span)
     if not grounded:
-        log.warning("job %s: none of %d evidence spans appear in the JD -> discarding",
-                    job.job_id, len(result.evidence_spans))
-        return None
+        if result.score >= EVIDENCE_REQUIRED_ABOVE:
+            log.warning("job %s: claims %d but none of %d quotes are in the JD "
+                        "-> discarding as unsound", job.job_id, result.score,
+                        len(result.evidence_spans))
+            return None
+        log.info("job %s scored %d with unverifiable quotes -- low score, kept",
+                 job.job_id, result.score)
+        return result
     result.evidence_spans = grounded
     return result
 
